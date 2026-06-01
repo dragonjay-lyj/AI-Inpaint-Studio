@@ -376,3 +376,88 @@ export async function callAIWithDegradation(
     throw err;
   }
 }
+
+/**
+ * 调用 GPT-Image API（/v1/images/generations 端点）
+ * 支持 gpt-image-2 等模型，使用参考图片 + prompt 生成新图片
+ */
+async function callGPTImageAPI(
+  config: ConnectionConfig,
+  originalImageBase64: string,
+  prompt: string
+): Promise<AIResult> {
+  const rawBase = config.baseUrl || "https://api.openai.com/v1";
+  const normalizedBase = rawBase.replace(/\/+$/, "");
+  const url = normalizedBase.includes("/v1") || normalizedBase.includes("/v1beta")
+    ? `${normalizedBase}/images/generations`
+    : `${normalizedBase}/v1/images/generations`;
+
+  // 从 base64 data URL 中提取图片尺寸
+  const sizeMatch = originalImageBase64.match(/^data:image\/\w+;base64,(.+)/);
+  let width = 1024, height = 1024;
+  if (sizeMatch) {
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = reject;
+        i.src = originalImageBase64;
+      });
+      width = img.naturalWidth;
+      height = img.naturalHeight;
+    } catch { /* fallback to default */ }
+  }
+
+  const body = {
+    prompt,
+    model: config.model,
+    size: `${width}x${height}`,
+    image: [originalImageBase64],
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.apiKey}`,
+      "User-Agent": "AI-Inpaint-Studio/1.0",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120000),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`GPT-Image API error ${response.status}: ${errText}`);
+  }
+
+  const data = await parseJSONResponse(response);
+
+  // gpt-image 返回格式: { data: [{ url: "..." }] }
+  const imageUrl = data.data?.[0]?.url;
+  if (imageUrl) {
+    // 下载图片并转为 base64
+    const imgResponse = await fetch(imageUrl, {
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!imgResponse.ok) {
+      throw new Error(`Failed to download generated image from ${imageUrl}`);
+    }
+    const blob = await imgResponse.blob();
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    return { imageDataUrl: dataUrl };
+  }
+
+  // 也检查 b64_json 格式（某些实现返回 base64）
+  const b64 = data.data?.[0]?.b64_json;
+  if (b64) {
+    return { imageDataUrl: `data:image/png;base64,${b64}` };
+  }
+
+  throw new Error("GPT-Image response did not contain image data");
+}
