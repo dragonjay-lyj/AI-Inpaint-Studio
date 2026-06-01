@@ -42,6 +42,62 @@ function parseMeta(text: string): { source?: string; target?: string } | undefin
 }
 
 /**
+ * 通过 userPrompt 关键词推断意图：翻译 vs 编辑。
+ * 翻译模式允许字符数变化、允许重新排版；编辑模式保持原样式。
+ */
+function inferPromptMode(userPrompt: string): "translate" | "edit" {
+  const txt = (userPrompt || "").toLowerCase();
+  // 中文/英文翻译关键词
+  const translateKw = /(翻译|译|嵌字|中译|日译|英译|translate|translation|chinese|english|japanese|korean|中文|日文|英文|韩文|韩语|日语|英语)/i;
+  if (translateKw.test(userPrompt)) return "translate";
+  if (translateKw.test(txt)) return "translate";
+  return "edit";
+}
+
+function buildGeminiPromptText(userPrompt: string): string {
+  const mode = inferPromptMode(userPrompt);
+  if (mode === "translate") {
+    return `You are a manga/comic localization artist. The whole image you receive IS the region to edit (already cropped, with some surrounding context for visual reference).
+
+USER REQUEST: ${userPrompt}
+
+TRANSLATION RULES (must follow):
+1. Translate faithfully. Character count WILL differ between languages — that is expected, do NOT pad or shorten.
+2. Replace ALL source-language text with the target language. Do NOT keep original Japanese/source characters unless they are proper nouns the user explicitly asked to keep.
+3. You MAY re-layout text: vertical Japanese / Korean can become horizontal Chinese / English when natural. Adjust line breaks for the target language's reading flow.
+4. Match the source's visual feel (similar weight, color, ballpark size) but do not pixel-lock the original metrics — readability of the translation matters more.
+5. Do NOT touch background, art, or any non-text pixels outside the original text region.
+6. Output dimensions MUST equal input dimensions. Blend edges with the surrounding context.
+
+After generating the image, output ONE plain-text line in this exact format (no extra commentary):
+META source="<the original text you saw, verbatim>" target="<the translated text you wrote>"`;
+  }
+
+  // 编辑模式：保持原样式（去水印 / 改细节 / 替换对象）
+  return `You are editing a cropped image region. The whole image you receive IS the region to edit (it already contains some surrounding context for visual reference).
+
+INSTRUCTION: ${userPrompt}
+
+EDIT RULES (must follow):
+1. Preserve the original visual style of unchanged areas (font, color, lighting, texture).
+2. If the instruction is to remove something (watermark / text / object), reconstruct the underlying background pixel-perfectly.
+3. Do NOT introduce content unrelated to the instruction.
+4. Output dimensions MUST equal input dimensions. Blend edges with the surrounding context.
+
+After generating the image, output ONE plain-text line:
+META source="<text or content you saw in the edit area>" target="<what you wrote / how you changed it>"`;
+}
+
+function buildOpenAISystemPrompt(userPrompt: string): string {
+  const mode = inferPromptMode(userPrompt);
+  if (mode === "translate") {
+    return `You are a manga/comic localization artist. The image you receive IS the region to edit (already cropped, with some surrounding context).
+RULES: (1) Translate ALL source-language text fully — character count will differ, that's fine. (2) Do NOT keep original-language characters unless proper nouns. (3) You may re-layout vertical→horizontal as appropriate. (4) Keep similar visual style. (5) Do not touch non-text pixels. (6) Output same dimensions; blend edges naturally.`;
+  }
+  return `You are a professional image editing AI. The image you receive IS the region to edit (already cropped, with some surrounding context). Apply the user's instruction. Preserve unchanged areas pixel-faithfully. Output the edited image of the SAME dimensions; blend edges naturally.`;
+}
+
+/**
  * 安全解析 JSON 响应，遇到 HTML/非 JSON 时给出清晰错误
  */
 async function parseJSONResponse(response: Response): Promise<any> {
@@ -80,24 +136,8 @@ async function callGeminiAPI(
     contents: [
       {
         parts: [
-          {
-            text:
-`You are editing a cropped image region. The whole image you receive IS the region to edit (it already contains some surrounding context for visual reference).
-
-INSTRUCTION: ${prompt}
-
-STRICT RULES (must follow):
-1. Preserve the ORIGINAL font size, font family, position, color, stroke and alignment of any text. Only replace the characters themselves.
-2. Do NOT add, duplicate, or insert any extra characters that were not in the source.
-3. Do NOT change the layout, spacing, or background outside of where the original characters were.
-4. The output image MUST have the same dimensions as the input.
-
-After generating the image, also output ONE line of plain text in this exact format (no extra commentary), so the caller can verify:
-META source="<the original characters you saw, verbatim>" target="<the characters you wrote into the output>"`,
-          },
-          {
-            inlineData: { mimeType, data: base64Data },
-          },
+          { text: buildGeminiPromptText(prompt) },
+          { inlineData: { mimeType, data: base64Data } },
         ],
       },
     ],
@@ -172,7 +212,7 @@ async function callOpenAIAPI(
     ? `${normalizedBase}/chat/completions`
     : `${normalizedBase}/v1/chat/completions`;
 
-  const systemMessage = `You are a professional image editing AI. The image you receive IS the region to edit (already cropped, with some surrounding context). Edit the whole image according to the instruction and return an edited image of the SAME dimensions. Blend the edges with the surrounding context naturally.`;
+  const systemMessage = buildOpenAISystemPrompt(prompt);
 
   const body: OpenAIRequest = {
     model: config.model,
