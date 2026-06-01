@@ -29,6 +29,38 @@ interface OpenAIRequest {
   max_tokens?: number;
 }
 
+export interface AIResult {
+  imageDataUrl: string;
+  meta?: { source?: string; target?: string };
+}
+
+function parseMeta(text: string): { source?: string; target?: string } | undefined {
+  if (!text) return undefined;
+  const m = text.match(/META\s+source="([^"]*)"\s+target="([^"]*)"/);
+  if (!m) return undefined;
+  return { source: m[1], target: m[2] };
+}
+
+/**
+ * 安全解析 JSON 响应，遇到 HTML/非 JSON 时给出清晰错误
+ */
+async function parseJSONResponse(response: Response): Promise<any> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    const preview = text.slice(0, 300);
+    if (preview.includes("<!doctype") || preview.includes("<html")) {
+      throw new Error(
+        `API 返回了 HTML 页面而非 JSON（通常是 URL 配置错误或中转站不兼容）。\n` +
+        `请求 URL: ${response.url}\n` +
+        `响应预览: ${preview}`
+      );
+    }
+    throw new Error(`Invalid JSON response (${response.status}): ${preview}`);
+  }
+}
+
 /**
  * 调用 Gemini API 进行图像编辑
  */
@@ -37,28 +69,31 @@ async function callGeminiAPI(
   originalImageBase64: string,
   maskRegion: Rect,
   prompt: string
-): Promise<string> {
+ ): Promise<AIResult> {
   const mimeType = originalImageBase64.startsWith("data:image/png")
     ? "image/png"
     : "image/jpeg";
 
   const base64Data = originalImageBase64.split(",")[1] || originalImageBase64;
 
-  const systemInstruction = `You are a professional image editing AI. You will receive an original image with a marked region and a text instruction describing what to do within that region.
-
-CRITICAL RULES:
-1. Keep EVERYTHING outside the marked region EXACTLY as the original — no changes to color, lighting, or texture outside the region. The rest of the image must remain pixel-perfect identical.
-2. Only modify the content WITHIN the marked rectangular region according to the user's prompt.
-3. Return the COMPLETE image with the changes applied — do NOT return only the masked region.
-4. The output must be a single image. Do NOT return text, descriptions, or code.
-5. Ensure seamless blending at the region boundaries — the edited area should look natural and consistent with surrounding pixels.`;
-
   const body: GeminiRequest = {
     contents: [
       {
         parts: [
           {
-            text: `EDIT REGION: x=${maskRegion.x}, y=${maskRegion.y}, width=${maskRegion.width}, height=${maskRegion.height}\n\nINSTRUCTION: ${prompt}\n\nPlease edit ONLY the specified rectangular region according to the instruction. Keep everything outside this region completely unchanged. Return the full modified image.`,
+            text:
+`You are editing a cropped image region. The whole image you receive IS the region to edit (it already contains some surrounding context for visual reference).
+
+INSTRUCTION: ${prompt}
+
+STRICT RULES (must follow):
+1. Preserve the ORIGINAL font size, font family, position, color, stroke and alignment of any text. Only replace the characters themselves.
+2. Do NOT add, duplicate, or insert any extra characters that were not in the source.
+3. Do NOT change the layout, spacing, or background outside of where the original characters were.
+4. The output image MUST have the same dimensions as the input.
+
+After generating the image, also output ONE line of plain text in this exact format (no extra commentary), so the caller can verify:
+META source="<the original characters you saw, verbatim>" target="<the characters you wrote into the output>"`,
           },
           {
             inlineData: { mimeType, data: base64Data },
@@ -67,17 +102,24 @@ CRITICAL RULES:
       },
     ],
     generationConfig: {
-      temperature: 0.4,
+      temperature: 0.2,
       responseModalities: ["IMAGE", "TEXT"],
     },
   };
 
-  const baseUrl = config.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+  const rawBase = config.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+  const normalizedBase = rawBase.replace(/\/+$/, "");
+  const baseUrl = normalizedBase.includes("/v1beta")
+    ? normalizedBase
+    : `${normalizedBase}/v1beta`;
   const url = `${baseUrl}/models/${config.model}:generateContent?key=${config.apiKey}`;
 
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": "AI-Inpaint-Studio/1.0",
+    },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120000),
   });
@@ -87,16 +129,31 @@ CRITICAL RULES:
     throw new Error(`Gemini API error ${response.status}: ${errText}`);
   }
 
-  const data = await response.json();
+  const data = await parseJSONResponse(response);
 
-  // 解析 Gemini 响应中的图片
-  for (const part of data.candidates?.[0]?.content?.parts ?? []) {
-    if (part.inlineData) {
-      return `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
+  const parts = data.candidates?.[0]?.content?.parts ?? [];
+  let imageDataUrl: string | null = null;
+  let textBlob = "";
+  for (const part of parts) {
+    if (part.inlineData && !imageDataUrl) {
+      imageDataUrl = `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
+    } else if (part.text) {
+      textBlob += part.text + "\n";
     }
   }
+  if (imageDataUrl) {
+    return { imageDataUrl, meta: parseMeta(textBlob) };
+  }
 
-  throw new Error("Gemini response did not contain an image");
+  // 无图片时收集文本用于诊断
+  const finishReason = data.candidates?.[0]?.finishReason || "UNKNOWN";
+  const safetyRatings = JSON.stringify(data.candidates?.[0]?.safetyRatings || []);
+  throw new Error(
+    `Gemini 未返回图片。finishReason=${finishReason}\n` +
+    (textBlob ? `文本回复: ${textBlob.slice(0, 200)}\n` : "") +
+    `安全评级: ${safetyRatings}\n` +
+    `提示: 请确认模型名称为图片生成模型（如 gemini-2.5-flash-image），或尝试调整提示词。`
+  );
 }
 
 /**
@@ -107,16 +164,15 @@ async function callOpenAIAPI(
   originalImageBase64: string,
   maskRegion: Rect,
   prompt: string
-): Promise<string> {
-  const url = config.baseUrl
-    ? `${config.baseUrl.replace(/\/$/, "")}/chat/completions`
-    : "https://api.openai.com/v1/chat/completions";
+): Promise<AIResult> {
+  const rawBase = config.baseUrl || "https://api.openai.com/v1";
+  // 自动补齐 /v1（中转站通常需要）
+  const normalizedBase = rawBase.replace(/\/+$/, "");
+  const url = normalizedBase.includes("/v1") || normalizedBase.includes("/v1beta")
+    ? `${normalizedBase}/chat/completions`
+    : `${normalizedBase}/v1/chat/completions`;
 
-  const systemMessage = `You are a professional image editing AI. When given an image with a specified region and editing instruction:
-1. Only modify the content within the specified rectangular region (x=${maskRegion.x}, y=${maskRegion.y}, w=${maskRegion.width}, h=${maskRegion.height}).
-2. Keep everything outside this region completely unchanged — pixel-perfect.
-3. Return the full image with edits applied.
-4. Ensure seamless blending at region boundaries.`;
+  const systemMessage = `You are a professional image editing AI. The image you receive IS the region to edit (already cropped, with some surrounding context). Edit the whole image according to the instruction and return an edited image of the SAME dimensions. Blend the edges with the surrounding context naturally.`;
 
   const body: OpenAIRequest = {
     model: config.model,
@@ -130,7 +186,7 @@ async function callOpenAIAPI(
         content: [
           {
             type: "text",
-            text: `Region to edit: (${maskRegion.x}, ${maskRegion.y}) size ${maskRegion.width}x${maskRegion.height}. Instruction: ${prompt}. Generate the full image with only this region modified.`,
+            text: `Instruction: ${prompt}. Return the edited image (same dimensions as the input).`,
           },
           {
             type: "image_url",
@@ -147,6 +203,7 @@ async function callOpenAIAPI(
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${config.apiKey}`,
+      "User-Agent": "AI-Inpaint-Studio/1.0",
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120000),
@@ -157,7 +214,7 @@ async function callOpenAIAPI(
     throw new Error(`OpenAI API error ${response.status}: ${errText}`);
   }
 
-  const data = await response.json();
+  const data = await parseJSONResponse(response);
 
   const content = data.choices?.[0]?.message?.content ?? "";
 
@@ -171,7 +228,7 @@ async function callOpenAIAPI(
     if (!imageData.startsWith("data:")) {
       imageData = "data:image/png;base64," + imageData;
     }
-    return imageData;
+    return { imageDataUrl: imageData, meta: parseMeta(content) };
   }
 
   // 检查是否返回了图片 URL
@@ -190,7 +247,7 @@ async function callOpenAIAPI(
         reader.onerror = reject;
         reader.readAsDataURL(blob);
       });
-      return dataUrl;
+      return { imageDataUrl: dataUrl, meta: parseMeta(content) };
     }
   }
 
@@ -209,7 +266,7 @@ export async function callAI(
   originalImageBase64: string,
   maskRegion: Rect,
   prompt: string
-): Promise<string> {
+): Promise<AIResult> {
   switch (config.provider) {
     case "gemini":
       return callGeminiAPI(config, originalImageBase64, maskRegion, prompt);
@@ -227,16 +284,28 @@ export async function callAI(
 export async function testConnection(config: ConnectionConfig): Promise<boolean> {
   try {
     if (config.provider === "gemini") {
-      const baseUrl = config.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+      const rawBase = config.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+      const normalizedBase = rawBase.replace(/\/+$/, "");
+      const baseUrl = normalizedBase.includes("/v1beta")
+        ? normalizedBase
+        : `${normalizedBase}/v1beta`;
       const url = `${baseUrl}/models?key=${config.apiKey}`;
-      const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const resp = await fetch(url, {
+        headers: { "User-Agent": "AI-Inpaint-Studio/1.0" },
+        signal: AbortSignal.timeout(10000),
+      });
       return resp.ok;
     } else {
-      const url = config.baseUrl
-        ? `${config.baseUrl.replace(/\/$/, "")}/models`
-        : "https://api.openai.com/v1/models";
+      const rawBase = config.baseUrl || "https://api.openai.com/v1";
+      const normalizedBase = rawBase.replace(/\/+$/, "");
+      const url = normalizedBase.includes("/v1") || normalizedBase.includes("/v1beta")
+        ? `${normalizedBase}/models`
+        : `${normalizedBase}/v1/models`;
       const resp = await fetch(url, {
-        headers: { Authorization: `Bearer ${config.apiKey}` },
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          "User-Agent": "AI-Inpaint-Studio/1.0",
+        },
         signal: AbortSignal.timeout(10000),
       });
       return resp.ok;
@@ -256,7 +325,7 @@ export async function callAIWithDegradation(
   originalImageBase64: string,
   maskRegion: Rect,
   prompt: string
-): Promise<string> {
+): Promise<AIResult> {
   try {
     return await callAI(config, originalImageBase64, maskRegion, prompt);
   } catch (err: any) {

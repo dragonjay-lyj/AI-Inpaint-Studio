@@ -25,6 +25,18 @@ import { testConnection } from "@/lib/api";
 import { checkBeforeGenerate } from "@/lib/guard";
 import type { ThemeType, LanguageType, ProviderType, ImageEntry } from "@/types";
 
+// 简易长度漂移检查：AI 返回的 target 字符数若与 source 差异过大，提示用户
+function checkLengthDrift(meta?: { source?: string; target?: string }): string | null {
+  if (!meta?.source || !meta?.target) return null;
+  const s = [...meta.source].length;
+  const t = [...meta.target].length;
+  if (s === 0) return null;
+  const ratio = t / s;
+  if (ratio > 2.5) return `译文偏长（${s} → ${t}），可能有幻觉字符，建议重试`;
+  if (ratio < 0.4) return `译文偏短（${s} → ${t}），可能漏字，建议重试`;
+  return null;
+}
+
 // ============================================================
 // Collapsible Section
 // ============================================================
@@ -194,20 +206,49 @@ export default function Sidebar() {
     updateImageStatus(current.id, "processing");
 
     const { callAI } = await import("@/lib/api");
-    const { compositeImage } = await import("@/lib/image");
+    const { compositeImage, extractRegion } = await import("@/lib/image");
 
     try {
-      // Process each selection
+      // Process each selection — 只上传选区内容
       let resultUrl = current.originalDataUrl;
+      const warnings: string[] = [];
 
       for (const sel of current.selections) {
         const prompt = sel.prompt || globalPrompt || "Edit this region naturally";
-        const generatedUrl = await callAI(connection, current.originalDataUrl, sel.rect, prompt);
-        resultUrl = await compositeImage(resultUrl, generatedUrl, sel.rect);
+
+        // 裁剪出选区图片，只发送选区内容给模型
+        const { regionDataUrl, expandedRect } = await extractRegion(
+          current.originalDataUrl, sel.rect, 30
+        );
+
+        // 原选区在裁剪图中的偏移位置（不含 padding）
+        const cropRect = {
+          x: sel.rect.x - expandedRect.x,
+          y: sel.rect.y - expandedRect.y,
+          width: sel.rect.width,
+          height: sel.rect.height,
+        };
+        const aiResult = await callAI(connection, regionDataUrl, cropRect, prompt);
+
+        const lenWarn = checkLengthDrift(aiResult.meta);
+        if (lenWarn) warnings.push(lenWarn);
+
+        // 只把用户原始选区 (sel.rect) 那一小块从生成图里贴回原图，padding 区域不参与合成
+        resultUrl = await compositeImage(
+          resultUrl,
+          aiResult.imageDataUrl,
+          sel.rect,
+          cropRect,
+          { width: expandedRect.width, height: expandedRect.height }
+        );
       }
 
       updateImageResult(current.id, resultUrl);
-      updateImageStatus(current.id, "done");
+      if (warnings.length > 0) {
+        updateImageStatus(current.id, "done", `⚠ ${warnings.join("；")}`);
+      } else {
+        updateImageStatus(current.id, "done");
+      }
       setViewMode("result");
     } catch (err: any) {
       updateImageStatus(current.id, "error", err.message);
@@ -239,7 +280,7 @@ export default function Sidebar() {
     setAbortController(abortCtrl);
 
     const { callAI } = await import("@/lib/api");
-    const { compositeImage } = await import("@/lib/image");
+    const { compositeImage, extractRegion } = await import("@/lib/image");
 
     const sourceSelections = current.selections.filter((s) => s.rect.width > 0 && s.rect.height > 0);
     const sourcePrompt = globalPrompt;
@@ -257,15 +298,31 @@ export default function Sidebar() {
 
       try {
         let resultUrl = img.originalDataUrl;
+        const warnings: string[] = [];
 
         for (const sel of sourceSelections) {
           const prompt = sourcePrompt || sel.prompt || "Edit this region naturally";
-          const generatedUrl = await callAI(connection, resultUrl, sel.rect, prompt);
-          resultUrl = await compositeImage(resultUrl, generatedUrl, sel.rect);
+          const { regionDataUrl, expandedRect } = await extractRegion(img.originalDataUrl, sel.rect, 30);
+          const cropRect = {
+            x: sel.rect.x - expandedRect.x,
+            y: sel.rect.y - expandedRect.y,
+            width: sel.rect.width,
+            height: sel.rect.height,
+          };
+          const aiResult = await callAI(connection, regionDataUrl, cropRect, prompt);
+          const lenWarn = checkLengthDrift(aiResult.meta);
+          if (lenWarn) warnings.push(lenWarn);
+          resultUrl = await compositeImage(
+            resultUrl,
+            aiResult.imageDataUrl,
+            sel.rect,
+            cropRect,
+            { width: expandedRect.width, height: expandedRect.height }
+          );
         }
 
         updateImageResult(img.id, resultUrl);
-        updateImageStatus(img.id, "done");
+        updateImageStatus(img.id, "done", warnings.length > 0 ? `⚠ ${warnings.join("；")}` : undefined);
         updateBatchProgress({ completed: batchProgress.completed + 1 });
       } catch (err: any) {
         updateImageStatus(img.id, "error", err.message);

@@ -5,18 +5,21 @@
 import type { Rect } from "@/types";
 
 /**
- * 将 AI 生成的完整图片中指定区域的内容合成到原图上
- * 使用 Canvas 2D API 实现精确像素级合成
+ * 把 AI 生成的图片中的指定子区域贴回原图。
  *
- * @param originalDataUrl - 原图 data URL
- * @param generatedDataUrl - AI 生成的完整图片 data URL
- * @param region - 需要替换的区域
- * @returns 合成后的图片 data URL
+ * 调用约定：
+ * - generatedImg 是 AI 返回的整张图，逻辑上对应 extractRegion 输出（expandedSize 大小），
+ *   但实际像素尺寸 (naturalWidth/Height) 可能与 expandedSize 不一致（模型重采样）。
+ * - sourceRect 是相对于 expandedSize 的坐标（即 cropRect，等于 sel.rect 在 expanded 内的偏移）。
+ * - destRect 是原图上要被覆盖的矩形（等于 sel.rect）。
+ * - 函数内部按 generated 的真实尺寸与 expandedSize 的比例做换算。
  */
 export async function compositeImage(
   originalDataUrl: string,
   generatedDataUrl: string,
-  region: Rect
+  destRect: Rect,
+  sourceRect?: Rect,
+  expandedSize?: { width: number; height: number }
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const canvas = document.createElement("canvas");
@@ -34,34 +37,34 @@ export async function compositeImage(
       generatedImg.crossOrigin = "anonymous";
 
       generatedImg.onload = () => {
-        // 使用原图尺寸
         canvas.width = originalImg.naturalWidth;
         canvas.height = originalImg.naturalHeight;
 
-        // 先绘制原图
         ctx.drawImage(originalImg, 0, 0);
 
-        // 计算生成的图片与原图的缩放比例
-        const scaleX = generatedImg.naturalWidth / originalImg.naturalWidth;
-        const scaleY = generatedImg.naturalHeight / originalImg.naturalHeight;
-
-        // 从生成的图片中裁剪对应区域，绘制到原图上
-        const srcX = Math.round(region.x * scaleX);
-        const srcY = Math.round(region.y * scaleY);
-        const srcW = Math.round(region.width * scaleX);
-        const srcH = Math.round(region.height * scaleY);
-
-        // 使用软边缘渐变来平滑合成（减少接缝）
         ctx.save();
         ctx.beginPath();
-        ctx.rect(region.x - 1, region.y - 1, region.width + 2, region.height + 2);
+        ctx.rect(destRect.x, destRect.y, destRect.width, destRect.height);
         ctx.clip();
 
-        // 绘制生成图片的对应区域
+        let src: Rect;
+        if (sourceRect && expandedSize) {
+          const sx = generatedImg.naturalWidth / expandedSize.width;
+          const sy = generatedImg.naturalHeight / expandedSize.height;
+          src = {
+            x: Math.round(sourceRect.x * sx),
+            y: Math.round(sourceRect.y * sy),
+            width: Math.round(sourceRect.width * sx),
+            height: Math.round(sourceRect.height * sy),
+          };
+        } else {
+          src = { x: 0, y: 0, width: generatedImg.naturalWidth, height: generatedImg.naturalHeight };
+        }
+
         ctx.drawImage(
           generatedImg,
-          srcX, srcY, srcW, srcH,
-          region.x, region.y, region.width, region.height
+          src.x, src.y, src.width, src.height,
+          destRect.x, destRect.y, destRect.width, destRect.height
         );
 
         ctx.restore();
