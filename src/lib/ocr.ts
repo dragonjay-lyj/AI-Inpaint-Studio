@@ -1,9 +1,146 @@
 // ============================================================
 // OCR Pipeline Module
-// Canvas-based text region detection and recognition (simplified)
+// 优先使用 Gemini 视觉做检测/识别，离线/未配置时回退到边缘检测
 // ============================================================
 
-import type { Rect } from "@/types";
+import type { ConnectionConfig, Rect } from "@/types";
+
+/**
+ * 通过 Gemini 视觉识别图像区域中的文字。
+ * 失败或没配置时回退到旧的伪 OCR。
+ */
+export async function recognizeTextWithAI(
+  config: ConnectionConfig | undefined,
+  imageDataUrl: string,
+  region: Rect,
+  language: string = "auto"
+): Promise<string> {
+  if (!config?.apiKey || config.provider !== "gemini") {
+    return recognizeText(imageDataUrl, region, language);
+  }
+  try {
+    const cropped = await cropToDataUrl(imageDataUrl, region);
+    const base64 = cropped.split(",")[1];
+    const mime = cropped.startsWith("data:image/png") ? "image/png" : "image/jpeg";
+    const rawBase = config.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+    const normalizedBase = rawBase.replace(/\/+$/, "");
+    const baseUrl = normalizedBase.includes("/v1beta") ? normalizedBase : `${normalizedBase}/v1beta`;
+    // 用纯文本 Gemini 做 OCR（不需要图像生成模型）
+    const ocrModel = config.model && !/image/i.test(config.model) ? config.model : "gemini-2.5-flash";
+    const url = `${baseUrl}/models/${ocrModel}:generateContent?key=${config.apiKey}`;
+    const langHint = language && language !== "auto" ? ` (expected language: ${language})` : "";
+    const body = {
+      contents: [
+        {
+          parts: [
+            { text: `Extract ALL visible text from this image${langHint}. Output ONLY the raw text, no explanations, no quotes. If multiple lines, preserve line breaks. If no text, output an empty string.` },
+            { inlineData: { mimeType: mime, data: base64 } },
+          ],
+        },
+      ],
+      generationConfig: { temperature: 0 },
+    };
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    const txt = (data.candidates?.[0]?.content?.parts ?? [])
+      .filter((p: any) => p.text)
+      .map((p: any) => p.text)
+      .join("");
+    return (txt || "").trim();
+  } catch (err) {
+    console.warn("[OCR] AI recognize failed, falling back to heuristic:", err);
+    return recognizeText(imageDataUrl, region, language);
+  }
+}
+
+/**
+ * 通过 Gemini 视觉直接得到所有文字区域的 bbox。
+ * 失败时回退到边缘检测 detectTextRegions。
+ */
+export async function detectTextRegionsWithAI(
+  config: ConnectionConfig | undefined,
+  imageDataUrl: string
+): Promise<Rect[]> {
+  if (!config?.apiKey || config.provider !== "gemini") {
+    return detectTextRegions(imageDataUrl);
+  }
+  try {
+    const dims = await imageDimensions(imageDataUrl);
+    const base64 = imageDataUrl.split(",")[1];
+    const mime = imageDataUrl.startsWith("data:image/png") ? "image/png" : "image/jpeg";
+    const rawBase = config.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+    const normalizedBase = rawBase.replace(/\/+$/, "");
+    const baseUrl = normalizedBase.includes("/v1beta") ? normalizedBase : `${normalizedBase}/v1beta`;
+    const ocrModel = config.model && !/image/i.test(config.model) ? config.model : "gemini-2.5-flash";
+    const url = `${baseUrl}/models/${ocrModel}:generateContent?key=${config.apiKey}`;
+    const body = {
+      contents: [
+        {
+          parts: [
+            { text: `Detect ALL text regions in this image (image size: ${dims.width} x ${dims.height} pixels). Output a JSON array with this exact format and nothing else:\n[{"x":<left px>,"y":<top px>,"width":<w px>,"height":<h px>}]\nUse pixel coordinates relative to the image. Do not include any prose or markdown fences.` },
+            { inlineData: { mimeType: mime, data: base64 } },
+          ],
+        },
+      ],
+      generationConfig: { temperature: 0 },
+    };
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    const txt: string = (data.candidates?.[0]?.content?.parts ?? [])
+      .filter((p: any) => p.text)
+      .map((p: any) => p.text)
+      .join("");
+    const jsonMatch = txt.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error("No JSON array in response");
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!Array.isArray(parsed)) throw new Error("Not an array");
+    return parsed
+      .filter((r: any) => Number.isFinite(r?.x) && Number.isFinite(r?.y) && r?.width > 0 && r?.height > 0)
+      .map((r: any) => ({ x: Math.max(0, r.x), y: Math.max(0, r.y), width: r.width, height: r.height }));
+  } catch (err) {
+    console.warn("[OCR] AI detect failed, falling back to edge detection:", err);
+    return detectTextRegions(imageDataUrl);
+  }
+}
+
+async function cropToDataUrl(src: string, rect: Rect): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = rect.width;
+      c.height = rect.height;
+      const ctx = c.getContext("2d");
+      if (!ctx) return reject(new Error("no ctx"));
+      ctx.drawImage(img, rect.x, rect.y, rect.width, rect.height, 0, 0, rect.width, rect.height);
+      resolve(c.toDataURL("image/png"));
+    };
+    img.onerror = () => reject(new Error("failed to load image"));
+    img.src = src;
+  });
+}
+
+async function imageDimensions(src: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => reject(new Error("failed to load image"));
+    img.src = src;
+  });
+}
 
 /**
  * Analyze image data to find regions with high contrast / edge density

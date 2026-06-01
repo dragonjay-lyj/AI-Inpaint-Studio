@@ -117,6 +117,7 @@ interface AppState {
   setCurrentImage: (id: string) => void;
   updateImageResult: (id: string, resultDataUrl: string) => void;
   updateImageStatus: (id: string, status: ImageEntry["status"], error?: string) => void;
+  updateImageMask: (id: string, maskDataUrl: string | undefined) => void;
   navigateImage: (direction: "next" | "prev") => void;
 
   // 选区操作
@@ -265,6 +266,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => ({
       images: state.images.map((img) =>
         img.id === id ? { ...img, status, error } : img
+      ),
+    })),
+
+  updateImageMask: (id, maskDataUrl) =>
+    set((state) => ({
+      images: state.images.map((img) =>
+        img.id === id ? { ...img, maskDataUrl } : img
       ),
     })),
 

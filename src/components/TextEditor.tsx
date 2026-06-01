@@ -17,10 +17,24 @@ import { useAppStore } from "@/lib/store";
  */
 export default function TextEditor() {
   const textBlocks = useAppStore((s) => s.textBlocks);
+  const updateTextBlock = useAppStore((s) => s.updateTextBlock);
   const [activeBlockIndex, setActiveBlockIndex] = useState<number>(-1);
   const [toast, setToast] = useState<string>("");
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const blockRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  const activeBlock =
+    activeBlockIndex >= 0 && activeBlockIndex < textBlocks.length
+      ? textBlocks[activeBlockIndex]
+      : null;
+
+  const toggleStyle = useCallback(
+    (key: "bold" | "italic" | "underline") => {
+      if (!activeBlock) return;
+      updateTextBlock(activeBlock.selectionId, { [key]: !activeBlock[key] });
+    },
+    [activeBlock, updateTextBlock]
+  );
 
   // 显示 toast 通知
   const showToast = useCallback((msg: string) => {
@@ -47,6 +61,20 @@ export default function TextEditor() {
   // 键盘导航
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      // Ctrl+B/I/U — 富文本样式切换（在文本块内编辑时生效）
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && activeBlock) {
+        const k = e.key.toLowerCase();
+        if (k === "b" || k === "i" || k === "u") {
+          const target = e.target as HTMLElement;
+          // 仅在 contentEditable 块内才接管，避免劫持地址栏等
+          if (target.isContentEditable) {
+            e.preventDefault();
+            toggleStyle(k === "b" ? "bold" : k === "i" ? "italic" : "underline");
+            return;
+          }
+        }
+      }
+
       if (!e.altKey) return;
       // Skip when user is typing in inputs/textareas (but allow in contentEditable blocks)
       const target = e.target as HTMLElement;
@@ -90,7 +118,7 @@ export default function TextEditor() {
         focusBlock(nextIndex);
       }
     },
-    [textBlocks, activeBlockIndex, focusBlock],
+    [textBlocks, activeBlockIndex, focusBlock, activeBlock, toggleStyle],
   );
 
   useEffect(() => {
@@ -123,6 +151,30 @@ export default function TextEditor() {
         </div>
       )}
 
+      {/* 富文本工具栏（仅在选中文本块时显示） */}
+      {activeBlock && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-1 bg-popover border border-border rounded-lg shadow-lg px-2 py-1.5">
+          <button
+            type="button"
+            onClick={() => toggleStyle("bold")}
+            className={`w-8 h-8 rounded font-bold text-sm transition-colors ${activeBlock.bold ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+            title="Bold (Ctrl+B)"
+          >B</button>
+          <button
+            type="button"
+            onClick={() => toggleStyle("italic")}
+            className={`w-8 h-8 rounded italic text-sm transition-colors ${activeBlock.italic ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+            title="Italic (Ctrl+I)"
+          >I</button>
+          <button
+            type="button"
+            onClick={() => toggleStyle("underline")}
+            className={`w-8 h-8 rounded underline text-sm transition-colors ${activeBlock.underline ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+            title="Underline (Ctrl+U)"
+          >U</button>
+        </div>
+      )}
+
       {/* 文本块层 */}
       {textBlocks.map((block) => (
         <div
@@ -149,6 +201,13 @@ export default function TextEditor() {
             textAlign: (block.alignment as "left" | "center" | "right") || "left",
             writingMode:
               block.direction === "vertical" ? "vertical-rl" : "horizontal-tb",
+            opacity: block.opacity ?? 1,
+            textShadow: block.shadow
+              ? `${block.shadow.offsetX}px ${block.shadow.offsetY}px ${block.shadow.blur}px ${block.shadow.color}`
+              : undefined,
+            WebkitTextStroke: block.strokeColor && block.strokeWidth
+              ? `${block.strokeWidth}px ${block.strokeColor}`
+              : undefined,
             // 位置由 Canvas 根据选区 rect 设置，这里仅作兜底
             left: 0,
             top: 0,

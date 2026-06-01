@@ -44,6 +44,8 @@ export default function Canvas() {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
+  const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastBrushPoint = useRef<Point | null>(null);
 
   // Store state
   const currentImage = useAppStore((s) => s.images.find((img) => img.id === s.currentImageId));
@@ -59,6 +61,8 @@ export default function Canvas() {
   const _pushHistory = useAppStore((s) => s._pushHistory);
   const activeTool = useAppStore((s) => s.activeTool);
   const setActiveTool = useAppStore((s) => s.setActiveTool);
+  const brushSize = useAppStore((s) => s.brushSize);
+  const updateImageMask = useAppStore((s) => s.updateImageMask);
 
   // Local state
   const [isDragging, setIsDragging] = useState(false);
@@ -221,6 +225,16 @@ export default function Canvas() {
 
       ctx.drawImage(img, imgX, imgY, imgW, imgH);
 
+      // 叠加 mask（半透明红色显示已涂区域）
+      const mc = maskCanvasRef.current;
+      if (mc) {
+        ctx.save();
+        ctx.globalAlpha = 0.45;
+        ctx.globalCompositeOperation = "source-over";
+        ctx.drawImage(mc, imgX, imgY, imgW, imgH);
+        ctx.restore();
+      }
+
       // 应用全局透明度（键盘0-9调整）
       ctx.globalAlpha = opacityRef.current;
 
@@ -305,8 +319,8 @@ export default function Canvas() {
         ctx.restore();
       }
 
-      // 绘制拖拽框（创建新选区）
-      if (dragMode === "select" && isDragging && activeTool === "select") {
+      // 绘制拖拽框（创建新选区 / 矩形抹字）
+      if (dragMode === "select" && isDragging && (activeTool === "select" || activeTool === "erase-rect")) {
         const ds = screenToImage(dragStart.x, dragStart.y);
         const dc = screenToImage(dragCurrent.x, dragCurrent.y);
 
@@ -332,10 +346,11 @@ export default function Canvas() {
     }
   }, [currentImage, zoom, panOffset, viewMode, dragMode, isDragging, dragStart, dragCurrent, hoveredSelection, hoveredHandle, activeTool, screenToImage]);
 
-  // 图片加载
+  // 图片加载 + 同步初始化 mask canvas
   useEffect(() => {
     if (!displayUrl) {
       cachedImage.current = null;
+      maskCanvasRef.current = null;
       setImageLoaded(false);
       return;
     }
@@ -343,14 +358,28 @@ export default function Canvas() {
     img.crossOrigin = "anonymous";
     img.onload = () => {
       cachedImage.current = img;
+      // 创建/重置 mask canvas
+      const mc = document.createElement("canvas");
+      mc.width = img.naturalWidth;
+      mc.height = img.naturalHeight;
+      // 如果已有保存的 mask，画进去
+      if (currentImage?.maskDataUrl) {
+        const maskImg = new Image();
+        maskImg.onload = () => {
+          mc.getContext("2d")?.drawImage(maskImg, 0, 0);
+        };
+        maskImg.src = currentImage.maskDataUrl;
+      }
+      maskCanvasRef.current = mc;
       setImageLoaded(true);
     };
     img.onerror = () => {
       cachedImage.current = null;
+      maskCanvasRef.current = null;
       setImageLoaded(false);
     };
     img.src = displayUrl;
-  }, [displayUrl]);
+  }, [displayUrl, currentImage?.id]);
 
   // 渲染循环
   useEffect(() => {
@@ -568,11 +597,12 @@ export default function Canvas() {
       if (activeTool === "brush" || activeTool === "eraser") {
         setDragMode(activeTool);
         setIsDragging(true);
+        lastBrushPoint.current = screenToImage(e.clientX, e.clientY);
         return;
       }
 
-      // 未命中任何条目 = 创建新选区 (select 模式)
-      if (activeTool === "select") {
+      // 未命中任何条目 = 创建新选区 (select 模式) 或抹字框 (erase-rect)
+      if (activeTool === "select" || activeTool === "erase-rect") {
         setDragMode("select");
         setIsDragging(true);
         return;
@@ -685,18 +715,34 @@ export default function Canvas() {
         return;
       }
 
-      // brush/eraser 模式 — 在 mousemove 中绘制
+      // brush/eraser 模式 — 在 mask canvas 上绘制
       if ((dragMode === "brush" || dragMode === "eraser") && currentImage) {
-        // Brush/eraser 绘制逻辑在 Canvas 上实时渲染
-        const canvas = canvasRef.current;
-        const ctx = canvas?.getContext("2d");
-        if (ctx && canvas) {
-          // 在遮罩层上绘制（简化实现：在选区所在的 canvas 上标记）
-          // 完整实现需要单独的遮罩层
+        const mc = maskCanvasRef.current;
+        const mctx = mc?.getContext("2d");
+        if (mc && mctx) {
+          const cur = screenToImage(e.clientX, e.clientY);
+          const prev = lastBrushPoint.current ?? cur;
+          mctx.save();
+          if (dragMode === "eraser") {
+            mctx.globalCompositeOperation = "destination-out";
+            mctx.strokeStyle = "rgba(0,0,0,1)";
+          } else {
+            mctx.globalCompositeOperation = "source-over";
+            mctx.strokeStyle = "rgba(255,80,80,1)";
+          }
+          mctx.lineCap = "round";
+          mctx.lineJoin = "round";
+          mctx.lineWidth = brushSize;
+          mctx.beginPath();
+          mctx.moveTo(prev.x, prev.y);
+          mctx.lineTo(cur.x, cur.y);
+          mctx.stroke();
+          mctx.restore();
+          lastBrushPoint.current = cur;
         }
       }
     },
-    [isDragging, dragMode, dragCurrent, dragStart, panOffset, zoom, screenToImage, moveSelection, updateSelection, hitTestHandle, hitTestRotationHandle, hitTestSelection, setPanOffset, currentImage, setHoveredRotationHandle]
+    [isDragging, dragMode, dragCurrent, dragStart, panOffset, zoom, screenToImage, moveSelection, updateSelection, hitTestHandle, hitTestRotationHandle, hitTestSelection, setPanOffset, currentImage, setHoveredRotationHandle, brushSize]
   );
 
   const handleMouseUp = useCallback(
@@ -717,6 +763,36 @@ export default function Canvas() {
         }
       }
 
+      // erase-rect 工具：拖框结束 → 调用 inpaint 去字
+      if (dragMode === "select" && isDragging && activeTool === "erase-rect" && currentImage) {
+        const startPt = screenToImage(dragStart.x, dragStart.y);
+        const endPt = screenToImage(dragCurrent.x, dragCurrent.y);
+        const rect: Rect = {
+          x: Math.min(startPt.x, endPt.x),
+          y: Math.min(startPt.y, endPt.y),
+          width: Math.abs(endPt.x - startPt.x),
+          height: Math.abs(endPt.y - startPt.y),
+        };
+        if (rect.width > 8 && rect.height > 8) {
+          const conn = useAppStore.getState().connection;
+          const imgId = currentImage.id;
+          useAppStore.getState().updateImageStatus(imgId, "processing");
+          // 异步调用，不阻塞 mouseup
+          (async () => {
+            try {
+              const { inpaintRect } = await import("@/lib/inpaint");
+              const src = currentImage.resultDataUrl ?? currentImage.originalDataUrl;
+              const out = await inpaintRect(conn, src, rect);
+              useAppStore.getState().updateImageResult(imgId, out);
+              useAppStore.getState().updateImageStatus(imgId, "done");
+              useAppStore.getState().setViewMode("result");
+            } catch (err: any) {
+              useAppStore.getState().updateImageStatus(imgId, "error", err?.message ?? "inpaint failed");
+            }
+          })();
+        }
+      }
+
       // 选区 resize/move 结束 — 更新起始 rect 为最终状态
       if ((dragMode === "resize" || dragMode === "move") && dragTargetSelId.current) {
         // history 已在 mousedown 时 push，这里不需要额外操作
@@ -727,6 +803,15 @@ export default function Canvas() {
         // rotation 已在 mousemove 中实时更新
       }
 
+      // brush/eraser 结束 — 持久化 mask 到 store
+      if ((dragMode === "brush" || dragMode === "eraser") && currentImage) {
+        const mc = maskCanvasRef.current;
+        if (mc) {
+          updateImageMask(currentImage.id, mc.toDataURL("image/png"));
+        }
+        lastBrushPoint.current = null;
+      }
+
       setIsDragging(false);
       setDragMode("none");
       dragTargetSelId.current = null;
@@ -735,7 +820,7 @@ export default function Canvas() {
       dragInitialAngle.current = 0;
       dragInitialSelRotation.current = 0;
     },
-    [dragMode, isDragging, activeTool, dragStart, dragCurrent, screenToImage, addSelection]
+    [dragMode, isDragging, activeTool, dragStart, dragCurrent, screenToImage, addSelection, currentImage, updateImageMask]
   );
 
   // 滚轮：默认缩放，Ctrl+滚轮 缩放（细粒度），Shift+滚轮 调画笔大小

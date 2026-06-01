@@ -52,6 +52,7 @@ export interface ImageEntry {
   fileName: string;
   originalDataUrl: string;  // 原始图片 data URL
   resultDataUrl?: string;   // 处理后的图片 data URL
+  maskDataUrl?: string;     // 全图蒙版（画笔/橡皮擦累积），白色 = 标记编辑区域
   width: number;
   height: number;
   selections: Selection[];  // 该图片的选区列表
@@ -101,7 +102,7 @@ export interface InpaintResponse {
 export type NavDirection = 'next' | 'prev';
 
 /** 工具栏工具类型 */
-export type ToolType = 'select' | 'brush' | 'eraser' | 'text' | 'hand';
+export type ToolType = 'select' | 'brush' | 'eraser' | 'text' | 'hand' | 'erase-rect';
 
 /** 编辑器模式 */
 export type EditorMode = 'default' | 'text' | 'sketch';
@@ -118,4 +119,30 @@ export interface TextBlock {
   underline: boolean;
   alignment: string;    // 'left' | 'center' | 'right'
   direction: string;    // 'horizontal' | 'vertical'
+  shadow?: { color: string; blur: number; offsetX: number; offsetY: number };
+  strokeColor?: string;
+  strokeWidth?: number;
+  opacity?: number;     // 0-1
 }
+
+/** 字体样式预设 */
+export interface FontPreset {
+  id: string;
+  name: string;
+  fontFamily: string;
+  fontSize: number;
+  color: string;
+  bold?: boolean;
+  italic?: boolean;
+  shadow?: { color: string; blur: number; offsetX: number; offsetY: number };
+  strokeColor?: string;
+  strokeWidth?: number;
+}
+
+export const FONT_PRESETS: FontPreset[] = [
+  { id: "default", name: "Default", fontFamily: "sans-serif", fontSize: 16, color: "#000000" },
+  { id: "manga-bubble", name: "Manga Bubble", fontFamily: '"CC Wild Words", "Comic Sans MS", sans-serif', fontSize: 18, color: "#000000", bold: true },
+  { id: "title", name: "Title", fontFamily: "serif", fontSize: 28, color: "#1a1a1a", bold: true, shadow: { color: "rgba(0,0,0,0.4)", blur: 4, offsetX: 1, offsetY: 1 } },
+  { id: "subtitle", name: "Subtitle", fontFamily: "sans-serif", fontSize: 14, color: "#ffffff", strokeColor: "#000000", strokeWidth: 2 },
+  { id: "sfx", name: "SFX (sound effect)", fontFamily: "Impact, sans-serif", fontSize: 32, color: "#ffd400", bold: true, italic: true, strokeColor: "#000000", strokeWidth: 3 },
+];

@@ -252,27 +252,71 @@ export async function smartLineBreak(
 // for consistent translation across pages
 // ============================================================
 
-let translationContext: { previousTexts: string[]; termGlossary: Record<string, string> } = {
-  previousTexts: [],
-  termGlossary: {},
-};
+interface ChapterContext {
+  chapterId: string;
+  previousTexts: string[];      // "原文 → 译文" 列表，按页面顺序
+  termGlossary: Record<string, string>;
+  pagesProcessed: number;
+}
 
-export function getTranslationContext() { return translationContext; }
+const chapters: Map<string, ChapterContext> = new Map();
+let activeChapterId = "default";
+
+function ensureChapter(id: string): ChapterContext {
+  let c = chapters.get(id);
+  if (!c) {
+    c = { chapterId: id, previousTexts: [], termGlossary: {}, pagesProcessed: 0 };
+    chapters.set(id, c);
+  }
+  return c;
+}
+
+export function setActiveChapter(id: string) {
+  activeChapterId = id;
+  ensureChapter(id);
+}
+
+export function getTranslationContext() {
+  return ensureChapter(activeChapterId);
+}
 
 export function addToContext(text: string, translation: string) {
-  translationContext.previousTexts.push(`${text} → ${translation}`);
-  if (translationContext.previousTexts.length > 50) translationContext.previousTexts.shift();
+  const c = ensureChapter(activeChapterId);
+  c.previousTexts.push(`${text} → ${translation}`);
+  if (c.previousTexts.length > 80) c.previousTexts.shift();
+}
+
+export function markPageDone() {
+  ensureChapter(activeChapterId).pagesProcessed += 1;
 }
 
 export function updateGlossary(terms: Record<string, string>) {
-  translationContext.termGlossary = { ...translationContext.termGlossary, ...terms };
+  const c = ensureChapter(activeChapterId);
+  c.termGlossary = { ...c.termGlossary, ...terms };
 }
 
-export async function translateWithContext(text: string, sourceLang: string, targetLang: string, config: ConnectionConfig): Promise<string> {
-  const contextStr = translationContext.previousTexts.slice(-10).join("\n");
-  const glossaryStr = Object.entries(translationContext.termGlossary).map(([k,v]) => `${k}=${v}`).join(", ");
+export function clearContext(chapterId?: string) {
+  if (chapterId) chapters.delete(chapterId);
+  else chapters.clear();
+}
 
-  const contextualPrompt = `Previous translations for context:\n${contextStr}\n\nGlossary: ${glossaryStr}\n\nTranslate: ${text}`;
+export async function translateWithContext(
+  text: string,
+  sourceLang: string,
+  targetLang: string,
+  config: ConnectionConfig,
+  contextWindow: number = 10
+): Promise<string> {
+  const c = ensureChapter(activeChapterId);
+  const contextStr = c.previousTexts.slice(-contextWindow).join("\n");
+  const glossaryStr = Object.entries(c.termGlossary)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ");
+
+  const contextualPrompt =
+    (contextStr ? `Previous translations (for tone & terminology consistency):\n${contextStr}\n\n` : "") +
+    (glossaryStr ? `Glossary (must use these translations for these terms): ${glossaryStr}\n\n` : "") +
+    `Translate the following to ${targetLang}, returning ONLY the translation:\n${text}`;
 
   const result = await translateText(contextualPrompt, sourceLang, targetLang, config);
   addToContext(text, result);
