@@ -48,9 +48,11 @@ export async function compositeImage(
         ctx.clip();
 
         let src: Rect;
-        if (sourceRect && expandedSize) {
-          const sx = generatedImg.naturalWidth / expandedSize.width;
-          const sy = generatedImg.naturalHeight / expandedSize.height;
+        if (sourceRect) {
+          const expW = expandedSize?.width ?? generatedImg.naturalWidth;
+          const expH = expandedSize?.height ?? generatedImg.naturalHeight;
+          const sx = generatedImg.naturalWidth / expW;
+          const sy = generatedImg.naturalHeight / expH;
           src = {
             x: Math.round(sourceRect.x * sx),
             y: Math.round(sourceRect.y * sy),

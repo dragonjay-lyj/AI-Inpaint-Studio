@@ -24,6 +24,8 @@ export interface Selection {
   active: boolean;
   rotation?: number;  // 旋转角度（度）
   maskDataUrl?: string; // 画笔/橡皮擦遮罩 data URL
+  /** 自由变形多边形顶点（图像坐标系）。存在时优先于 rect 渲染选区轮廓 */
+  polygonPoints?: Point[];
 }
 
 /** 支持的 AI 提供商 */

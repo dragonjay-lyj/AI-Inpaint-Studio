@@ -46,6 +46,7 @@ export default function Canvas() {
   const animationRef = useRef<number>(0);
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastBrushPoint = useRef<Point | null>(null);
+  const eraseRectButton = useRef<"left" | "right">("left");
 
   // Store state
   const currentImage = useAppStore((s) => s.images.find((img) => img.id === s.currentImageId));
@@ -63,6 +64,9 @@ export default function Canvas() {
   const setActiveTool = useAppStore((s) => s.setActiveTool);
   const brushSize = useAppStore((s) => s.brushSize);
   const updateImageMask = useAppStore((s) => s.updateImageMask);
+  const eraseRectAutoMode = useAppStore((s) => s.eraseRectAutoMode);
+  const setPendingEraseRect = useAppStore((s) => s.setPendingEraseRect);
+  const pendingEraseRect = useAppStore((s) => s.pendingEraseRect);
 
   // Local state
   const [isDragging, setIsDragging] = useState(false);
@@ -261,23 +265,56 @@ export default function Canvas() {
         ctx.fillStyle = isActive
           ? "rgba(59, 130, 246, 0.15)"
           : "rgba(59, 130, 246, 0.08)";
-        ctx.fillRect(sx, sy, sw, sh);
 
-        ctx.strokeStyle = isActive
-          ? "#3b82f6"
-          : isHovered
-          ? "#93c5fd"
-          : "rgba(59, 130, 246, 0.5)";
-        ctx.lineWidth = isActive ? 2 : 1.5;
-        ctx.setLineDash(isActive ? [] : [6, 3]);
-        ctx.strokeRect(sx, sy, sw, sh);
-        ctx.setLineDash([]);
+        if (sel.polygonPoints && sel.polygonPoints.length >= 3) {
+          // 自由变形多边形
+          ctx.beginPath();
+          for (let i = 0; i < sel.polygonPoints.length; i++) {
+            const p = sel.polygonPoints[i];
+            const px = imgX + p.x * zoom;
+            const py = imgY + p.y * zoom;
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = isActive ? "#3b82f6" : isHovered ? "#93c5fd" : "rgba(59, 130, 246, 0.5)";
+          ctx.lineWidth = isActive ? 2 : 1.5;
+          ctx.setLineDash(isActive ? [] : [6, 3]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          if (isActive) {
+            // 顶点手柄
+            for (const p of sel.polygonPoints) {
+              const px = imgX + p.x * zoom;
+              const py = imgY + p.y * zoom;
+              ctx.fillStyle = "#3b82f6";
+              ctx.fillRect(px - HANDLE_HALF, py - HANDLE_HALF, HANDLE_SIZE, HANDLE_SIZE);
+              ctx.strokeStyle = "white";
+              ctx.lineWidth = 1;
+              ctx.strokeRect(px - HANDLE_HALF, py - HANDLE_HALF, HANDLE_SIZE, HANDLE_SIZE);
+            }
+          }
+        } else {
+          ctx.fillRect(sx, sy, sw, sh);
+
+          ctx.strokeStyle = isActive
+            ? "#3b82f6"
+            : isHovered
+            ? "#93c5fd"
+            : "rgba(59, 130, 246, 0.5)";
+          ctx.lineWidth = isActive ? 2 : 1.5;
+          ctx.setLineDash(isActive ? [] : [6, 3]);
+          ctx.strokeRect(sx, sy, sw, sh);
+          ctx.setLineDash([]);
+        }
 
         ctx.restore();
 
         // 手柄（在恢复变换后的坐标系中绘制，保持轴对齐）
         ctx.save();
-        if (isActive) {
+        if (isActive && !sel.polygonPoints) {
           const handles = getHandlePositions(sel, imgX, imgY, zoom);
           for (let i = 0; i < 8; i++) {
             const hPos = handles[i];
@@ -338,13 +375,33 @@ export default function Canvas() {
         ctx.setLineDash([]);
       }
 
+      // 渲染未提交的矩形抹字框（手动模式下）
+      if (activeTool === "erase-rect" && pendingEraseRect && !isDragging) {
+        const px = imgX + pendingEraseRect.x * zoom;
+        const py = imgY + pendingEraseRect.y * zoom;
+        const pw = pendingEraseRect.width * zoom;
+        const ph = pendingEraseRect.height * zoom;
+        ctx.save();
+        ctx.fillStyle = "rgba(245, 158, 11, 0.15)";
+        ctx.fillRect(px, py, pw, ph);
+        ctx.strokeStyle = "#f59e0b";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 2]);
+        ctx.strokeRect(px, py, pw, ph);
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#f59e0b";
+        ctx.font = "bold 11px monospace";
+        ctx.fillText("Space=修复 Ctrl+D=删除", px + 4, py - 4);
+        ctx.restore();
+      }
+
       // 画笔/橡皮擦光标指示
       if ((activeTool === "brush" || activeTool === "eraser") && !isDragging) {
         // 绘制一个小圆指示画笔位置 (会在 mousemove 中通过 hover 更新，这里用 ref 存储位置)
         // 实际画笔绘制在 mousemove 中处理
       }
     }
-  }, [currentImage, zoom, panOffset, viewMode, dragMode, isDragging, dragStart, dragCurrent, hoveredSelection, hoveredHandle, activeTool, screenToImage]);
+  }, [currentImage, zoom, panOffset, viewMode, dragMode, isDragging, dragStart, dragCurrent, hoveredSelection, hoveredHandle, activeTool, screenToImage, pendingEraseRect]);
 
   // 图片加载 + 同步初始化 mask canvas
   useEffect(() => {
@@ -450,12 +507,68 @@ export default function Canvas() {
           e.preventDefault();
           useAppStore.getState().redo();
         }
+        // Ctrl+D — 删除当前未提交的矩形抹字框
+        if ((e.ctrlKey || e.metaKey) && (e.key === "d" || e.key === "D")) {
+          e.preventDefault();
+          useAppStore.getState().setPendingEraseRect(null);
+          return;
+        }
+        // 空格 — 对未提交的矩形执行修复（仅 erase-rect 工具非自动模式）
+        if (e.code === "Space" && !isInput) {
+          const st = useAppStore.getState();
+          if (st.activeTool === "erase-rect" && st.pendingEraseRect && !st.eraseRectAutoMode) {
+            e.preventDefault();
+            const rect = st.pendingEraseRect;
+            const cur = st.getCurrentImage();
+            if (cur) {
+              const conn = st.connection;
+              const imgId = cur.id;
+              st.updateImageStatus(imgId, "processing");
+              (async () => {
+                try {
+                  const { inpaintRect } = await import("@/lib/inpaint");
+                  const src = cur.resultDataUrl ?? cur.originalDataUrl;
+                  const out = await inpaintRect(conn, src, rect);
+                  useAppStore.getState().updateImageResult(imgId, out);
+                  useAppStore.getState().updateImageStatus(imgId, "done");
+                  useAppStore.getState().setViewMode("result");
+                  useAppStore.getState().setPendingEraseRect(null);
+                } catch (err: any) {
+                  useAppStore.getState().updateImageStatus(imgId, "error", err?.message ?? "inpaint failed");
+                }
+              })();
+              return;
+            }
+          }
+        }
         // Q/W/E 工具切换
         if (e.key === "q" || e.key === "Q") { e.preventDefault(); useAppStore.getState().setActiveTool("select"); }
         if (e.key === "w" || e.key === "W") { e.preventDefault(); useAppStore.getState().setActiveTool("brush"); }
         if (e.key === "e" || e.key === "E") { e.preventDefault(); useAppStore.getState().setActiveTool("eraser"); }
         if (e.key === "r" || e.key === "R") { e.preventDefault(); useAppStore.getState().setActiveTool("text"); }
         if (e.key === "h" || e.key === "H") { e.preventDefault(); useAppStore.getState().setActiveTool("hand"); }
+        // T 切换文本编辑模式 / P 切换画板模式
+        if (e.key === "t" || e.key === "T") {
+          const mode = useAppStore.getState().editorMode;
+          useAppStore.getState().setEditorMode(mode === "text" ? "default" : "text");
+        }
+        if (e.key === "p" || e.key === "P") {
+          const mode = useAppStore.getState().editorMode;
+          useAppStore.getState().setEditorMode(mode === "sketch" ? "default" : "sketch");
+        }
+        // Ctrl+Q/W/E 文件操作（用 CustomEvent 通知 Sidebar）
+        if ((e.ctrlKey || e.metaKey) && (e.key === "q" || e.key === "Q")) {
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("file-action", { detail: { action: "open" } }));
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === "w" || e.key === "W") && !e.shiftKey) {
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("file-action", { detail: { action: "save" } }));
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === "e" || e.key === "E")) {
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("file-action", { detail: { action: "export" } }));
+        }
         // Ctrl+滚轮缩放
         if (e.ctrlKey && (e.key === "=" || e.key === "+")) {
           e.preventDefault();
@@ -522,7 +635,26 @@ export default function Canvas() {
         return;
       }
 
+      // erase-rect 工具的右键 = 拖框清除该区域结果（恢复原图）
+      if (e.button === 2 && activeTool === "erase-rect") {
+        setDragMode("select");
+        setIsDragging(true);
+        // 标记当前是右键模式：临时把 dragCurrent 的 button 信息存起来不行，用 ref
+        eraseRectButton.current = "right";
+        return;
+      }
+
+      // text 工具的右键 = 拉文本框（在 editorMode=text 或 activeTool=text 时）
+      const editorMode = useAppStore.getState().editorMode;
+      if (e.button === 2 && (activeTool === "text" || editorMode === "text")) {
+        setDragMode("select");
+        setIsDragging(true);
+        eraseRectButton.current = "right";
+        return;
+      }
+
       if (e.button !== 0) return;
+      eraseRectButton.current = "left";
 
       // Hand 工具始终平移
       if (activeTool === "hand") {
@@ -763,7 +895,47 @@ export default function Canvas() {
         }
       }
 
-      // erase-rect 工具：拖框结束 → 调用 inpaint 去字
+      // text 工具/text 模式 + 右键拖框结束 → 创建文本框
+      const editorModeNow = useAppStore.getState().editorMode;
+      if (
+        dragMode === "select" &&
+        isDragging &&
+        eraseRectButton.current === "right" &&
+        (activeTool === "text" || editorModeNow === "text")
+      ) {
+        const startPt = screenToImage(dragStart.x, dragStart.y);
+        const endPt = screenToImage(dragCurrent.x, dragCurrent.y);
+        const rect: Rect = {
+          x: Math.min(startPt.x, endPt.x),
+          y: Math.min(startPt.y, endPt.y),
+          width: Math.abs(endPt.x - startPt.x),
+          height: Math.abs(endPt.y - startPt.y),
+        };
+        if (rect.width > 8 && rect.height > 8) {
+          addSelection(rect);
+          // 找新建的 selection（最后一个）并附加 textBlock
+          setTimeout(() => {
+            const cur = useAppStore.getState().getCurrentImage();
+            const sel = cur?.selections[cur.selections.length - 1];
+            if (sel) {
+              useAppStore.getState().addTextBlock({
+                selectionId: sel.id,
+                text: "",
+                fontFamily: "sans-serif",
+                fontSize: 16,
+                color: "#000000",
+                bold: false,
+                italic: false,
+                underline: false,
+                alignment: "left",
+                direction: "horizontal",
+              });
+            }
+          }, 0);
+        }
+      }
+
+      // erase-rect 工具：拖框结束
       if (dragMode === "select" && isDragging && activeTool === "erase-rect" && currentImage) {
         const startPt = screenToImage(dragStart.x, dragStart.y);
         const endPt = screenToImage(dragCurrent.x, dragCurrent.y);
@@ -774,22 +946,40 @@ export default function Canvas() {
           height: Math.abs(endPt.y - startPt.y),
         };
         if (rect.width > 8 && rect.height > 8) {
-          const conn = useAppStore.getState().connection;
-          const imgId = currentImage.id;
-          useAppStore.getState().updateImageStatus(imgId, "processing");
-          // 异步调用，不阻塞 mouseup
-          (async () => {
-            try {
-              const { inpaintRect } = await import("@/lib/inpaint");
-              const src = currentImage.resultDataUrl ?? currentImage.originalDataUrl;
-              const out = await inpaintRect(conn, src, rect);
-              useAppStore.getState().updateImageResult(imgId, out);
-              useAppStore.getState().updateImageStatus(imgId, "done");
-              useAppStore.getState().setViewMode("result");
-            } catch (err: any) {
-              useAppStore.getState().updateImageStatus(imgId, "error", err?.message ?? "inpaint failed");
+          if (eraseRectButton.current === "right") {
+            // 右键：清除该区域已有的修复结果（用原图覆盖）
+            const imgId = currentImage.id;
+            const originalDataUrl = currentImage.originalDataUrl;
+            const resultUrl = currentImage.resultDataUrl;
+            if (resultUrl) {
+              (async () => {
+                const { compositeImage } = await import("@/lib/image");
+                // generatedImg = 原图整张，从 rect 处取像素贴回 result 的 rect 处
+                const restored = await compositeImage(resultUrl, originalDataUrl, rect, rect);
+                useAppStore.getState().updateImageResult(imgId, restored);
+              })();
             }
-          })();
+          } else if (eraseRectAutoMode) {
+            // 自动模式：立即修复
+            const conn = useAppStore.getState().connection;
+            const imgId = currentImage.id;
+            useAppStore.getState().updateImageStatus(imgId, "processing");
+            (async () => {
+              try {
+                const { inpaintRect } = await import("@/lib/inpaint");
+                const src = currentImage.resultDataUrl ?? currentImage.originalDataUrl;
+                const out = await inpaintRect(conn, src, rect);
+                useAppStore.getState().updateImageResult(imgId, out);
+                useAppStore.getState().updateImageStatus(imgId, "done");
+                useAppStore.getState().setViewMode("result");
+              } catch (err: any) {
+                useAppStore.getState().updateImageStatus(imgId, "error", err?.message ?? "inpaint failed");
+              }
+            })();
+          } else {
+            // 手动模式：暂存为待提交矩形，等空格或"修复"按钮触发
+            setPendingEraseRect(rect);
+          }
         }
       }
 
@@ -898,6 +1088,10 @@ export default function Canvas() {
         dragInitialSelRotation.current = 0;
       }}
       onWheel={handleWheel}
+      onContextMenu={(e) => {
+        // erase-rect 工具的右键被自定义为"清除区域"
+        if (activeTool === "erase-rect" || activeTool === "text") e.preventDefault();
+      }}
       tabIndex={0}
     >
       <canvas ref={canvasRef} className="absolute inset-0" />

@@ -99,6 +99,10 @@ interface AppState {
   activeTool: ToolType;
   brushSize: number;
 
+  // 矩形抹字工具：自动模式 + 当前未提交的临时矩形
+  eraseRectAutoMode: boolean;
+  pendingEraseRect: Rect | null;
+
   // 编辑器模式
   editorMode: EditorMode;
   sketchOpacity: number;
@@ -130,6 +134,11 @@ interface AppState {
   // 选区拖动编辑（手柄交互）
   moveSelection: (id: string, dx: number, dy: number) => void;
   resizeSelection: (id: string, handle: string, newRect: Rect) => void;
+
+  // 自由变形：把 rect 转成 polygonPoints (4 角)，或新增/移动多边形顶点
+  convertSelectionToPolygon: (id: string) => void;
+  updatePolygonPoint: (id: string, index: number, x: number, y: number) => void;
+  insertPolygonPoint: (id: string, afterIndex: number, x: number, y: number) => void;
 
   // 撤销/重做
   undo: () => void;
@@ -164,6 +173,8 @@ interface AppState {
   // 工具切换
   setActiveTool: (tool: ToolType) => void;
   setBrushSize: (size: number) => void;
+  setEraseRectAutoMode: (v: boolean) => void;
+  setPendingEraseRect: (r: Rect | null) => void;
 
   // 视图控制
   setViewMode: (mode: "original" | "result") => void;
@@ -226,6 +237,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   abortController: null,
   activeTool: "select",
   brushSize: 20,
+  eraseRectAutoMode: true,
+  pendingEraseRect: null,
   editorMode: "default",
   sketchOpacity: 0.5,
   textBlocks: [],
@@ -483,6 +496,43 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().updateSelection(id, { rect: { ...newRect } });
   },
 
+  convertSelectionToPolygon: (id) => {
+    const cur = get().getCurrentImage();
+    if (!cur) return;
+    const sel = cur.selections.find((s) => s.id === id);
+    if (!sel || sel.polygonPoints) return;
+    const r = sel.rect;
+    const points = [
+      { x: r.x, y: r.y },
+      { x: r.x + r.width, y: r.y },
+      { x: r.x + r.width, y: r.y + r.height },
+      { x: r.x, y: r.y + r.height },
+    ];
+    get().updateSelection(id, { polygonPoints: points });
+  },
+
+  updatePolygonPoint: (id, index, x, y) => {
+    const cur = get().getCurrentImage();
+    if (!cur) return;
+    const sel = cur.selections.find((s) => s.id === id);
+    if (!sel?.polygonPoints) return;
+    const next = sel.polygonPoints.map((p, i) => (i === index ? { x, y } : p));
+    // 同步重算 bounding rect
+    const xs = next.map((p) => p.x), ys = next.map((p) => p.y);
+    const rect = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+    get().updateSelection(id, { polygonPoints: next, rect });
+  },
+
+  insertPolygonPoint: (id, afterIndex, x, y) => {
+    const cur = get().getCurrentImage();
+    if (!cur) return;
+    const sel = cur.selections.find((s) => s.id === id);
+    if (!sel?.polygonPoints) return;
+    const next = [...sel.polygonPoints];
+    next.splice(afterIndex + 1, 0, { x, y });
+    get().updateSelection(id, { polygonPoints: next });
+  },
+
   // ── 全局提示词 ──
   setGlobalPrompt: (prompt) => set({ globalPrompt: prompt }),
 
@@ -571,6 +621,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   // ── 工具切换 ──
   setActiveTool: (tool) => set({ activeTool: tool }),
   setBrushSize: (size) => set({ brushSize: Math.max(1, Math.min(100, size)) }),
+  setEraseRectAutoMode: (v) => set({ eraseRectAutoMode: v }),
+  setPendingEraseRect: (r) => set({ pendingEraseRect: r }),
 
   // ── 视图 ──
   setViewMode: (mode) => set({ viewMode: mode }),

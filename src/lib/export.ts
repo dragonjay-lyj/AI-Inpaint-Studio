@@ -41,6 +41,32 @@ async function dataUrlToCanvas(
   });
 }
 
+// ─── 全量结果 ZIP 下载 ─────────────────────────────────────────
+
+/**
+ * 把所有图片的处理结果（resultDataUrl，没有则用原图）打包成 zip。
+ * 文件名沿用 fileName，重名追加 -1/-2。
+ */
+export async function exportAllAsZip(images: ImageEntry[]): Promise<Blob> {
+  const JSZip = (await import("jszip")).default;
+  const zip = new JSZip();
+  const used = new Map<string, number>();
+
+  for (const img of images) {
+    const src = img.resultDataUrl || img.originalDataUrl;
+    let name = img.fileName || `image-${img.id}.png`;
+    if (!/\.(png|jpe?g|gif|webp|bmp)$/i.test(name)) name += ".png";
+    const count = used.get(name) || 0;
+    used.set(name, count + 1);
+    if (count > 0) {
+      const dot = name.lastIndexOf(".");
+      name = `${name.slice(0, dot)}-${count}${name.slice(dot)}`;
+    }
+    zip.file(name, dataUrlToBytes(src));
+  }
+  return zip.generateAsync({ type: "blob" });
+}
+
 // ─── PSD Export (layered PNG ZIP) ────────────────────────────
 
 /**

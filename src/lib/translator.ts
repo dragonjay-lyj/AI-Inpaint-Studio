@@ -135,11 +135,15 @@ function mockTranslate(text: string, sourceLang: string, targetLang: string): st
 /**
  * Extract key terms from a list of texts.
  *
- * Placeholder implementation: splits by whitespace and counts
- * frequency. A real implementation would use NLP-based term extraction.
+ * 频率统计找候选 → 调 AI 一次性翻译所有候选词。
+ * 没配 AI 时回退到 placeholder 行为。
  */
 export async function extractTerms(
   texts: string[],
+  config?: ConnectionConfig,
+  sourceLang: string = "auto",
+  targetLang: string = "en",
+  topN: number = 20
 ): Promise<Record<string, string>> {
   const termCounts: Record<string, number> = {};
 
@@ -149,23 +153,52 @@ export async function extractTerms(
       .filter((w) => w.length > 1);
 
     for (const word of words) {
-      const lower = word.toLowerCase();
-      termCounts[lower] = (termCounts[lower] || 0) + 1;
+      // 保留大小写（专有名词常以大写起首）
+      termCounts[word] = (termCounts[word] || 0) + 1;
     }
   }
 
-  // Return top 20 most frequent terms as a translation map
-  // (placeholder — real implementation would call translation API)
-  const sorted = Object.entries(termCounts)
+  const candidates = Object.entries(termCounts)
+    .filter(([, c]) => c >= 2) // 至少出现 2 次
     .sort(([, a], [, b]) => b - a)
-    .slice(0, 20);
+    .slice(0, topN)
+    .map(([t]) => t);
 
-  const result: Record<string, string> = {};
-  for (const [term] of sorted) {
-    result[term] = `[${term}]`; // placeholder translation
+  if (candidates.length === 0) return {};
+
+  // 没配置 AI: 占位 fallback
+  if (!config?.apiKey) {
+    const r: Record<string, string> = {};
+    for (const t of candidates) r[t] = `[${t}]`;
+    return r;
   }
 
-  return result;
+  try {
+    const list = candidates.map((t, i) => `${i + 1}. ${t}`).join("\n");
+    const prompt =
+      `You are a terminology assistant. Translate the following ${candidates.length} terms ` +
+      `from ${sourceLang === "auto" ? "the detected source language" : sourceLang} to ${targetLang}. ` +
+      `These are likely proper nouns or recurring vocabulary in a story; translate them consistently.\n\n` +
+      `Output ONLY a JSON object mapping each source term to its translation, like {"term1":"译1","term2":"译2"}. ` +
+      `No prose, no markdown fences.\n\nTerms:\n${list}`;
+
+    const raw = await translateText(prompt, sourceLang, targetLang, config);
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error("no JSON in response");
+    const parsed = JSON.parse(m[0]);
+    if (typeof parsed !== "object" || !parsed) throw new Error("not an object");
+    const result: Record<string, string> = {};
+    for (const term of candidates) {
+      const v = parsed[term];
+      if (typeof v === "string" && v.trim()) result[term] = v.trim();
+    }
+    return result;
+  } catch (err) {
+    console.warn("[extractTerms] AI failed, falling back:", err);
+    const r: Record<string, string> = {};
+    for (const t of candidates) r[t] = `[${t}]`;
+    return r;
+  }
 }
 
 /**
@@ -244,6 +277,35 @@ export async function smartLineBreak(
   }
 
   return lines;
+}
+
+/**
+ * AI 驱动的智能断句：让模型基于语义+断行宽度返回多行文本。
+ * 失败时回退到字符宽度估算的 smartLineBreak。
+ */
+export async function smartLineBreakAI(
+  text: string,
+  maxCharsPerLine: number,
+  config?: ConnectionConfig,
+  language: string = "auto"
+): Promise<string[]> {
+  if (!text.trim()) return [];
+  if (!config?.apiKey) {
+    return smartLineBreak(text, maxCharsPerLine);
+  }
+  try {
+    const prompt =
+      `Insert line breaks into this ${language === "auto" ? "" : language + " "}text so each line fits within about ${maxCharsPerLine} characters. ` +
+      `Break at natural semantic boundaries (clause, phrase, breath). For CJK text avoid breaking inside a word; for Latin avoid breaking inside a word. ` +
+      `Output ONLY the rewrapped text with \\n as line breaks. Do not change wording, do not add commentary.\n\nText:\n${text}`;
+    const out = await translateText(prompt, language, language, config);
+    const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) throw new Error("empty");
+    return lines;
+  } catch (err) {
+    console.warn("[smartLineBreakAI] failed, fallback to heuristic:", err);
+    return smartLineBreak(text, maxCharsPerLine);
+  }
 }
 
 // ============================================================

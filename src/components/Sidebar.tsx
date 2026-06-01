@@ -123,6 +123,20 @@ export default function Sidebar() {
   const [folderImportCount, setFolderImportCount] = useState(0);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
+  // 全局文件快捷键 (Ctrl+Q/W/E)
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail;
+      if (detail?.action === "open") fileInputRef.current?.click();
+      else if (detail?.action === "save") handleDownloadRef.current?.();
+      else if (detail?.action === "export") handleDownloadAllRef.current?.();
+    };
+    window.addEventListener("file-action", handler as EventListener);
+    return () => window.removeEventListener("file-action", handler as EventListener);
+  }, []);
+  const handleDownloadRef = useRef<(() => void) | null>(null);
+  const handleDownloadAllRef = useRef<(() => void) | null>(null);
+
   // Handle single file upload
   const handleFileUpload = useCallback(
     async (files: FileList | File[]) => {
@@ -372,27 +386,21 @@ export default function Sidebar() {
     a.download = current.fileName.replace(/\.[^.]+$/, "_edited.png");
     a.click();
   };
+  handleDownloadRef.current = handleDownload;
 
   // Download all as ZIP
   const handleDownloadAll = async () => {
     const doneImages = images.filter((img) => img.resultDataUrl);
     if (doneImages.length === 0) return;
-
-    const JSZip = (await import("jszip")).default;
-
-    const zip = new JSZip();
-    for (const img of doneImages) {
-      const base64 = img.resultDataUrl!.split(",")[1];
-      zip.file(img.fileName.replace(/\.[^.]+$/, "_edited.png"), base64, { base64: true });
-    }
-
-    const blob = await zip.generateAsync({ type: "blob" });
+    const { exportAllAsZip } = await import("@/lib/export");
+    const blob = await exportAllAsZip(doneImages);
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `inpaint_results_${Date.now()}.zip`;
     a.click();
     URL.revokeObjectURL(a.href);
   };
+  handleDownloadAllRef.current = handleDownloadAll;
 
   // Theme class management
   useEffect(() => {
