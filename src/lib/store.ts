@@ -97,6 +97,7 @@ interface AppState {
 
   // 工具状态
   activeTool: ToolType;
+  brushSize: number;
 
   // 编辑器模式
   editorMode: EditorMode;
@@ -161,6 +162,7 @@ interface AppState {
 
   // 工具切换
   setActiveTool: (tool: ToolType) => void;
+  setBrushSize: (size: number) => void;
 
   // 视图控制
   setViewMode: (mode: "original" | "result") => void;
@@ -222,6 +224,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   isProcessing: false,
   abortController: null,
   activeTool: "select",
+  brushSize: 20,
   editorMode: "default",
   sketchOpacity: 0.5,
   textBlocks: [],
@@ -559,6 +562,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // ── 工具切换 ──
   setActiveTool: (tool) => set({ activeTool: tool }),
+  setBrushSize: (size) => set({ brushSize: Math.max(1, Math.min(100, size)) }),
 
   // ── 视图 ──
   setViewMode: (mode) => set({ viewMode: mode }),

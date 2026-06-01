@@ -738,19 +738,21 @@ export default function Canvas() {
     [dragMode, isDragging, activeTool, dragStart, dragCurrent, screenToImage, addSelection]
   );
 
-  // 滚轮缩放
+  // 滚轮：默认缩放，Ctrl+滚轮 缩放（细粒度），Shift+滚轮 调画笔大小
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       e.preventDefault();
-      if (e.ctrlKey) {
-        // Ctrl+滚轮 = 调整画笔/选区大小
+      if (e.shiftKey && (activeTool === "brush" || activeTool === "eraser")) {
+        const cur = useAppStore.getState().brushSize;
+        const next = e.deltaY > 0 ? cur - 2 : cur + 2;
+        useAppStore.getState().setBrushSize(next);
         return;
       }
       const delta = e.deltaY > 0 ? -0.1 : 0.1;
       const newZoom = Math.max(0.1, Math.min(10, zoom + delta));
       setZoom(newZoom);
     },
-    [zoom, setZoom]
+    [zoom, setZoom, activeTool]
   );
 
   // 粘贴
