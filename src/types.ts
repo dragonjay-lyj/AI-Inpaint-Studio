@@ -29,7 +29,7 @@ export interface Selection {
 }
 
 /** 支持的 AI 提供商 */
-export type ProviderType = 'gemini' | 'openai' | 'custom';
+export type ProviderType = 'gemini' | 'openai' | 'custom' | 'gpt-image';
 
 /** API 连接配置 */
 export interface ConnectionConfig {

@@ -756,6 +756,7 @@ export default function Sidebar() {
             <option value="gemini">Google Gemini</option>
             <option value="openai">OpenAI</option>
             <option value="custom">Custom (OpenAI Compatible)</option>
+            <option value="gpt-image">GPT-Image</option>
           </select>
 
           {/* API Key */}

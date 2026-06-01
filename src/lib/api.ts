@@ -313,6 +313,8 @@ export async function callAI(
     case "openai":
     case "custom":
       return callOpenAIAPI(config, originalImageBase64, maskRegion, prompt);
+    case "gpt-image":
+      return callGPTImageAPI(config, originalImageBase64, prompt);
     default:
       throw new Error(`Unsupported provider: ${config.provider}`);
   }
@@ -336,6 +338,7 @@ export async function testConnection(config: ConnectionConfig): Promise<boolean>
       });
       return resp.ok;
     } else {
+      // openai / custom / gpt-image 都用同一个测试端点
       const rawBase = config.baseUrl || "https://api.openai.com/v1";
       const normalizedBase = rawBase.replace(/\/+$/, "");
       const url = normalizedBase.includes("/v1") || normalizedBase.includes("/v1beta")
