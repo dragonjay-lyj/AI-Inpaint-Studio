@@ -30,7 +30,8 @@
     "@radix-ui/react-scroll-area": "^1.2.10",
     "@radix-ui/react-separator": "^1.1.8",
     "@radix-ui/react-popover": "^1.1.15",
-    "class-variance-authority": "^0.7.1"
+    "class-variance-authority": "^0.7.1",
+    "framer-motion": "^12.40.0"
   },
   "devDependencies": {
     "typescript": "^6.0.3",

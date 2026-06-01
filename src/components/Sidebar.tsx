@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, useCallback, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   Upload,
   FolderOpen,
@@ -63,7 +64,20 @@ function CollapsibleSection({
           <ChevronDown className="w-3.5 h-3.5" />
         )}
       </button>
-      {open && <div className="px-3 pb-3 space-y-2.5">{children}</div>}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            className="px-3 pb-3 space-y-2.5"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: "easeInOut" }}
+            style={{ overflow: "hidden" }}
+          >
+            {children}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -528,8 +542,13 @@ export default function Sidebar() {
                 ) : null;
 
               return (
-                <div
+                <motion.div
                   key={img.id}
+                  layout
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8, x: -20 }}
+                  transition={{ type: "spring", stiffness: 400, damping: 25 }}
                   onClick={() => setCurrentImage(img.id)}
                   className={cn(
                     "flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-xs transition-colors group",
@@ -569,7 +588,7 @@ export default function Sidebar() {
                       )}
                     </button>
                   </div>
-                </div>
+                </motion.div>
               );
             })
           )}
@@ -621,8 +640,14 @@ export default function Sidebar() {
       </div>
 
       {/* Error display */}
-      {currentImage?.status === "error" && currentImage.error && (
-        <div className="mx-3 mb-1 p-2 border border-destructive/30 bg-destructive/5 rounded-lg">
+      <AnimatePresence>
+        {currentImage?.status === "error" && currentImage.error && (
+          <motion.div
+            initial={{ opacity: 0, y: -8, height: 0 }}
+            animate={{ opacity: 1, y: 0, height: "auto" }}
+            exit={{ opacity: 0, y: -8, height: 0 }}
+            className="mx-3 mb-1 p-2 border border-destructive/30 bg-destructive/5 rounded-lg"
+          >
           <div className="flex items-start gap-1.5">
             <AlertCircle className="w-3.5 h-3.5 text-destructive shrink-0 mt-0.5" />
             <div className="min-w-0">
@@ -636,11 +661,16 @@ export default function Sidebar() {
               忽略
             </button>
           </div>
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
 
       {/* Action Buttons */}
-      <div className="p-3 border-b border-sidebar-border space-y-2">
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="p-3 border-b border-sidebar-border space-y-2"
+      >
         {!isProcessing ? (
           <>
             <button
@@ -688,7 +718,7 @@ export default function Sidebar() {
             {t("sidebar.downloadAll", language)}
           </button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Batch Progress */}
       {isProcessing && batchProgress.total > 0 && (

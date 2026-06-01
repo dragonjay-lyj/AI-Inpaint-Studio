@@ -8,9 +8,10 @@ const Sidebar = dynamic(() => import("@/components/Sidebar"), { ssr: false });
 const Toolbar = dynamic(() => import("@/components/Toolbar"), { ssr: false });
 const Canvas = dynamic(() => import("@/components/Canvas"), { ssr: false });
 const ImageList = dynamic(() => import("@/components/ImageList"), { ssr: false });
+const Onboarding = dynamic(() => import("@/components/Onboarding"), { ssr: false });
 
 export default function Home() {
-  const images = useAppStore((s) => s.images);
+  const showOnboarding = useAppStore((s) => s.showOnboarding);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
@@ -28,6 +29,9 @@ export default function Home() {
         {/* Bottom Image Strip */}
         <ImageList />
       </div>
+
+      {/* Onboarding overlay */}
+      {showOnboarding && <Onboarding />}
     </div>
   );
 }

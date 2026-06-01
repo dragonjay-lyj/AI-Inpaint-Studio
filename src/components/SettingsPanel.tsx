@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import { motion } from "framer-motion";
 import {
   Settings,
   Save,
@@ -127,12 +128,16 @@ export default function SettingsPanel() {
       />
 
       {/* Panel */}
-      <div
+      <motion.div
         className={cn(
           "fixed top-0 right-0 z-50 h-full w-full max-w-sm",
           "bg-sidebar border-l border-border shadow-xl",
           "flex flex-col",
         )}
+        initial={{ x: "100%" }}
+        animate={{ x: 0 }}
+        exit={{ x: "100%" }}
+        transition={{ type: "spring", stiffness: 300, damping: 30 }}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
@@ -496,7 +501,7 @@ export default function SettingsPanel() {
             onChange={handleImport}
           />
         </div>
-      </div>
+      </motion.div>
     </>
   );
 }

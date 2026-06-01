@@ -97,6 +97,10 @@ interface AppState {
 
   // 工具状态
   activeTool: ToolType;
+
+  // 引导
+  showOnboarding: boolean;
+  setShowOnboarding: (show: boolean) => void;
   brushSize: number;
 
   // 矩形抹字工具：自动模式 + 当前未提交的临时矩形
@@ -236,6 +240,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   isProcessing: false,
   abortController: null,
   activeTool: "select",
+  showOnboarding: (() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem("ai-inpaint-onboarding-done") !== "1";
+  })(),
   brushSize: 20,
   eraseRectAutoMode: true,
   pendingEraseRect: null,
@@ -620,6 +628,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // ── 工具切换 ──
   setActiveTool: (tool) => set({ activeTool: tool }),
+
+  setShowOnboarding: (show) => set({ showOnboarding: show }),
   setBrushSize: (size) => set({ brushSize: Math.max(1, Math.min(100, size)) }),
   setEraseRectAutoMode: (v) => set({ eraseRectAutoMode: v }),
   setPendingEraseRect: (r) => set({ pendingEraseRect: r }),
