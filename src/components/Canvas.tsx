@@ -10,13 +10,15 @@ type HandleIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 const HANDLE_SIZE = 8;
 const HANDLE_HALF = HANDLE_SIZE / 2;
 
-// 8个手柄相对于选区的位置
+// 8个手柄相对于选区的位置（自动应用 rotation）
 function getHandlePositions(sel: Selection, imgX: number, imgY: number, zoom: number) {
   const sx = imgX + sel.rect.x * zoom;
   const sy = imgY + sel.rect.y * zoom;
   const sw = sel.rect.width * zoom;
   const sh = sel.rect.height * zoom;
-  return [
+  const cx = sx + sw / 2;
+  const cy = sy + sh / 2;
+  const raw = [
     { x: sx, y: sy },                         // 0: 左上
     { x: sx + sw / 2, y: sy },                // 1: 上中
     { x: sx + sw, y: sy },                    // 2: 右上
@@ -26,6 +28,31 @@ function getHandlePositions(sel: Selection, imgX: number, imgY: number, zoom: nu
     { x: sx, y: sy + sh },                    // 6: 左下
     { x: sx, y: sy + sh / 2 },                // 7: 左中
   ];
+  const rot = sel.rotation || 0;
+  if (!rot) return raw;
+  const r = (rot * Math.PI) / 180;
+  const c = Math.cos(r), s = Math.sin(r);
+  return raw.map((p) => ({
+    x: cx + (p.x - cx) * c - (p.y - cy) * s,
+    y: cy + (p.x - cx) * s + (p.y - cy) * c,
+  }));
+}
+
+// 旋转手柄（橙色圆点）位置：选区上方 16px（已 rotate）
+function getRotationHandlePosition(sel: Selection, imgX: number, imgY: number, zoom: number) {
+  const sx = imgX + sel.rect.x * zoom;
+  const sy = imgY + sel.rect.y * zoom;
+  const sw = sel.rect.width * zoom;
+  const sh = sel.rect.height * zoom;
+  const cx = sx + sw / 2;
+  const cy = sy + sh / 2;
+  const px = sx + sw / 2;
+  const py = sy - 16;
+  const rot = sel.rotation || 0;
+  if (!rot) return { x: px, y: py };
+  const r = (rot * Math.PI) / 180;
+  const c = Math.cos(r), s = Math.sin(r);
+  return { x: cx + (px - cx) * c - (py - cy) * s, y: cy + (px - cx) * s + (py - cy) * c };
 }
 
 // 手柄对应的光标样式
@@ -143,7 +170,7 @@ export default function Canvas() {
     [currentImage, zoom, panOffset]
   );
 
-  // 检测鼠标在旋转手柄上（橙色圆点，位于选区顶部中央上方16px处）
+  // 检测鼠标在旋转手柄上（橙色圆点，位于选区顶部中央上方16px处，跟随旋转）
   const hitTestRotationHandle = useCallback(
     (screenX: number, screenY: number): string | null => {
       if (!currentImage || !containerRef.current) return null;
@@ -156,14 +183,9 @@ export default function Canvas() {
 
       for (const sel of currentImage.selections) {
         if (!sel.active) continue;
-        const sx = imgX + sel.rect.x * zoom;
-        const sy = imgY + sel.rect.y * zoom;
-        const sw = sel.rect.width * zoom;
-        const centerX = sx + sw / 2;
-        const centerY = sy;
-        const handleX = containerRect.left + centerX;
-        const handleY = containerRect.top + centerY - 16;
-
+        const h = getRotationHandlePosition(sel, imgX, imgY, zoom);
+        const handleX = containerRect.left + h.x;
+        const handleY = containerRect.top + h.y;
         const dist = Math.sqrt((screenX - handleX) ** 2 + (screenY - handleY) ** 2);
         if (dist <= 7) {
           return sel.id;
@@ -336,11 +358,10 @@ export default function Canvas() {
             );
           }
 
-          // 旋转手柄（橙色圆点，位于选区顶部中央上方16px处）
-          const rotHandleX = sx + sw / 2;
-          const rotHandleY = sy - 16;
+          // 旋转手柄（橙色圆点，位于选区顶部中央上方16px处，跟随选区旋转）
+          const rotHandle = getRotationHandlePosition(sel, imgX, imgY, zoom);
           ctx.beginPath();
-          ctx.arc(rotHandleX, rotHandleY, 5, 0, Math.PI * 2);
+          ctx.arc(rotHandle.x, rotHandle.y, 5, 0, Math.PI * 2);
           ctx.fillStyle = "#f59e0b";
           ctx.fill();
           ctx.strokeStyle = "white";
@@ -789,39 +810,72 @@ export default function Canvas() {
       }
 
       if (dragMode === "resize" && dragTargetSelId.current && dragHandleIndex.current !== null && dragSelStartRect.current) {
-        const imgStart = screenToImage(dragCurrent.x - (e.clientX - dragCurrent.x), dragCurrent.y - (e.clientY - dragCurrent.y));
         const imgNow = screenToImage(e.clientX, e.clientY);
         const orig = dragSelStartRect.current;
+        const sel = currentImage?.selections.find((s) => s.id === dragTargetSelId.current);
+        const rot = sel?.rotation || 0;
+
+        // 旋转情况下：把鼠标坐标反旋转回选区局部坐标系
+        let mx = imgNow.x, my = imgNow.y;
+        if (rot) {
+          const cx = orig.x + orig.width / 2;
+          const cy = orig.y + orig.height / 2;
+          const r = (-rot * Math.PI) / 180;
+          const c = Math.cos(r), s = Math.sin(r);
+          const dx = imgNow.x - cx;
+          const dy = imgNow.y - cy;
+          mx = cx + dx * c - dy * s;
+          my = cy + dx * s + dy * c;
+        }
+
         let newRect = { ...orig };
         const hi = dragHandleIndex.current;
 
-        // 根据手柄调整 rect
+        // 在局部坐标系（未旋转）中按手柄调整 rect
         if (hi === 0) { // 左上
-          newRect.x = Math.min(imgNow.x, orig.x + orig.width);
-          newRect.y = Math.min(imgNow.y, orig.y + orig.height);
+          newRect.x = Math.min(mx, orig.x + orig.width);
+          newRect.y = Math.min(my, orig.y + orig.height);
           newRect.width = orig.x + orig.width - newRect.x;
           newRect.height = orig.y + orig.height - newRect.y;
         } else if (hi === 1) { // 上中
-          newRect.y = Math.min(imgNow.y, orig.y + orig.height);
+          newRect.y = Math.min(my, orig.y + orig.height);
           newRect.height = orig.y + orig.height - newRect.y;
         } else if (hi === 2) { // 右上
-          newRect.y = Math.min(imgNow.y, orig.y + orig.height);
-          newRect.width = Math.max(5, imgNow.x - orig.x);
+          newRect.y = Math.min(my, orig.y + orig.height);
+          newRect.width = Math.max(5, mx - orig.x);
           newRect.height = orig.y + orig.height - newRect.y;
         } else if (hi === 3) { // 右中
-          newRect.width = Math.max(5, imgNow.x - orig.x);
+          newRect.width = Math.max(5, mx - orig.x);
         } else if (hi === 4) { // 右下
-          newRect.width = Math.max(5, imgNow.x - orig.x);
-          newRect.height = Math.max(5, imgNow.y - orig.y);
+          newRect.width = Math.max(5, mx - orig.x);
+          newRect.height = Math.max(5, my - orig.y);
         } else if (hi === 5) { // 下中
-          newRect.height = Math.max(5, imgNow.y - orig.y);
+          newRect.height = Math.max(5, my - orig.y);
         } else if (hi === 6) { // 左下
-          newRect.x = Math.min(imgNow.x, orig.x + orig.width);
+          newRect.x = Math.min(mx, orig.x + orig.width);
           newRect.width = orig.x + orig.width - newRect.x;
-          newRect.height = Math.max(5, imgNow.y - orig.y);
+          newRect.height = Math.max(5, my - orig.y);
         } else if (hi === 7) { // 左中
-          newRect.x = Math.min(imgNow.x, orig.x + orig.width);
+          newRect.x = Math.min(mx, orig.x + orig.width);
           newRect.width = orig.x + orig.width - newRect.x;
+        }
+
+        // 旋转情况下，为了保持中心位置稳定，需要让选区中心保持不变
+        if (rot) {
+          const oldCx = orig.x + orig.width / 2;
+          const oldCy = orig.y + orig.height / 2;
+          const newCx = newRect.x + newRect.width / 2;
+          const newCy = newRect.y + newRect.height / 2;
+          // 在局部坐标里改的中心偏移，需要旋转回世界坐标系才能正确地"留在原中心"
+          // 这里简单做法：保持旋转，但以原中心为锚点重新算 x/y
+          const dxLocal = newCx - oldCx;
+          const dyLocal = newCy - oldCy;
+          const r = (rot * Math.PI) / 180;
+          const c = Math.cos(r), s = Math.sin(r);
+          const dxWorld = dxLocal * c - dyLocal * s;
+          const dyWorld = dxLocal * s + dyLocal * c;
+          newRect.x = oldCx + dxWorld - newRect.width / 2;
+          newRect.y = oldCy + dyWorld - newRect.height / 2;
         }
 
         updateSelection(dragTargetSelId.current, { rect: newRect });
