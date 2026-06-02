@@ -238,15 +238,16 @@ export default function Sidebar() {
 
     try {
       // Process each selection — 只上传选区内容
-      let resultUrl = current.originalDataUrl;
+      let resultUrl = current.resultDataUrl || current.originalDataUrl;
       const warnings: string[] = [];
 
       for (const sel of current.selections) {
+        if (sel.processed) continue; // 跳过已翻译的选区
         const prompt = sel.prompt || globalPrompt || "Edit this region naturally";
 
         // 裁剪出选区图片，只发送选区内容给模型
         const { regionDataUrl, expandedRect } = await extractRegion(
-          current.originalDataUrl, sel.rect, 30
+          resultUrl, sel.rect, 30
         );
 
         // 原选区在裁剪图中的偏移位置（不含 padding）
@@ -272,6 +273,10 @@ export default function Sidebar() {
       }
 
       updateImageResult(current.id, resultUrl);
+      // 标记所有选区为已处理
+      current.selections.forEach((s) => {
+        if (!s.processed) updateSelection(s.id, { processed: true } as any);
+      });
       if (warnings.length > 0) {
         updateImageStatus(current.id, "done", `⚠ ${warnings.join("；")}`);
       } else {
@@ -325,7 +330,7 @@ export default function Sidebar() {
       updateBatchProgress({ currentImage: img.fileName });
 
       try {
-        let resultUrl = img.originalDataUrl;
+        let resultUrl = img.resultDataUrl || img.originalDataUrl;
         const warnings: string[] = [];
 
         for (const sel of sourceSelections) {

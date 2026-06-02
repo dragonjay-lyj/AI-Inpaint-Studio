@@ -22,6 +22,7 @@ export interface Selection {
   rect: Rect;         // 画布上的相对坐标（基于图片坐标）
   prompt: string;     // 该选区的提示词
   active: boolean;
+  processed?: boolean; // 是否已经过 AI 处理
   rotation?: number;  // 旋转角度（度）
   maskDataUrl?: string; // 画笔/橡皮擦遮罩 data URL
   /** 自由变形多边形顶点（图像坐标系）。存在时优先于 rect 渲染选区轮廓 */

@@ -307,16 +307,31 @@ export async function callAI(
   maskRegion: Rect,
   prompt: string
 ): Promise<AIResult> {
-  switch (config.provider) {
-    case "gemini":
-      return callGeminiAPI(config, originalImageBase64, maskRegion, prompt);
-    case "openai":
-    case "custom":
-      return callOpenAIAPI(config, originalImageBase64, maskRegion, prompt);
-    case "gpt-image":
-      return callGPTImageAPI(config, originalImageBase64, prompt);
-    default:
-      throw new Error(`Unsupported provider: ${config.provider}`);
+  try {
+    switch (config.provider) {
+      case "gemini":
+        return await callGeminiAPI(config, originalImageBase64, maskRegion, prompt);
+      case "openai":
+      case "custom":
+        return await callOpenAIAPI(config, originalImageBase64, maskRegion, prompt);
+      case "gpt-image":
+        return await callGPTImageAPI(config, originalImageBase64, maskRegion, prompt);
+      default:
+        throw new Error(`Unsupported provider: ${config.provider}`);
+    }
+  } catch (err: any) {
+    // 检测 CORS 错误
+    if (err instanceof TypeError && err.message.includes("Failed to fetch")) {
+      throw new Error(
+        "网络请求被阻止（CORS 错误）。\n" +
+        "这通常是因为中转站未配置跨域访问头 (Access-Control-Allow-Origin)。\n" +
+        "解决方法：\n" +
+        "1. 检查中转站是否配置了 CORS 白名单\n" +
+        "2. 或在浏览器中安装 CORS 插件（仅开发环境）\n" +
+        "3. 或使用支持 CORS 的中转站服务"
+      );
+    }
+    throw err;
   }
 }
 
@@ -387,8 +402,14 @@ export async function callAIWithDegradation(
 async function callGPTImageAPI(
   config: ConnectionConfig,
   originalImageBase64: string,
+  maskRegion: Rect,
   prompt: string
 ): Promise<AIResult> {
+  // 中转站模式：中转站不支持 data: URI 作为 image 参数，改用 chat/completions 端点
+  if (config.baseUrl) {
+    return callOpenAIAPI(config, originalImageBase64, maskRegion, prompt);
+  }
+
   const rawBase = config.baseUrl || "https://api.openai.com/v1";
   const normalizedBase = rawBase.replace(/\/+$/, "");
   const url = normalizedBase.includes("/v1") || normalizedBase.includes("/v1beta")
