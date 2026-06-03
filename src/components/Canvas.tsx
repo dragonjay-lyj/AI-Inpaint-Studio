@@ -112,6 +112,7 @@ export default function Canvas() {
   const dragInitialSelRotation = useRef<number>(0);
   const opacityRef = useRef<number>(1);
   const dragRotateCenter = useRef<Point>({ x: 0, y: 0 });
+  const lastPinchDist = useRef<number | null>(null);
 
   // Pan with middle mouse or space+click
   const isPanKey = useRef(false);
@@ -640,6 +641,13 @@ export default function Canvas() {
     return "crosshair";
   }, [activeTool, dragMode, hoveredHandle, hoveredSelection, hoveredRotationHandle]);
 
+  const getEventPoint = (e: React.MouseEvent | React.TouchEvent): Point => {
+    if ('touches' in e) {
+      return { x: e.touches[0]?.clientX ?? 0, y: e.touches[0]?.clientY ?? 0 };
+    }
+    return { x: e.clientX, y: e.clientY };
+  };
+
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (!currentImage) return;
@@ -1067,6 +1075,404 @@ export default function Canvas() {
     [dragMode, isDragging, activeTool, dragStart, dragCurrent, screenToImage, addSelection, currentImage, updateImageMask]
   );
 
+  // ── Touch event handlers ──────────────────────────────────────────
+
+  const handleTouchStart = useCallback(
+    (e: React.TouchEvent) => {
+      if (!currentImage || e.touches.length !== 1) return;
+      e.preventDefault();
+
+      const point: Point = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      setDragStart(point);
+      setDragCurrent(point);
+
+      // Touch = always left click (button 0), no middle/right button handling
+
+      // Hand  tool → pan
+      if (activeTool === "hand") {
+        setDragMode("pan");
+        setIsDragging(true);
+        return;
+      }
+
+      // Check handle hit
+      const handleHit = hitTestHandle(point.x, point.y);
+      if (handleHit && activeTool === "select") {
+        setDragMode("resize");
+        setIsDragging(true);
+        dragTargetSelId.current = handleHit.selId;
+        dragHandleIndex.current = handleHit.handle;
+        const sel = currentImage.selections.find((s) => s.id === handleHit.selId);
+        if (sel) dragSelStartRect.current = { ...sel.rect };
+        return;
+      }
+
+      // Check rotation handle hit
+      const rotHandleHit = hitTestRotationHandle(point.x, point.y);
+      if (rotHandleHit && activeTool === "select") {
+        setDragMode("rotate");
+        setIsDragging(true);
+        setHoveredRotationHandle(false);
+        dragTargetSelId.current = rotHandleHit;
+        const sel = currentImage.selections.find((s) => s.id === rotHandleHit);
+        if (sel) {
+          const container = containerRef.current;
+          if (container) {
+            const containerRect = container.getBoundingClientRect();
+            const cx = containerRect.width / 2 + panOffset.x;
+            const cy = containerRect.height / 2 + panOffset.y;
+            const imgX = cx - (cachedImage.current?.naturalWidth ?? 0) * zoom / 2;
+            const imgY = cy - (cachedImage.current?.naturalHeight ?? 0) * zoom / 2;
+            const sx = imgX + sel.rect.x * zoom;
+            const sy = imgY + sel.rect.y * zoom;
+            const sw = sel.rect.width * zoom;
+            const sh = sel.rect.height * zoom;
+            const centerX = sx + sw / 2;
+            const centerY = sy + sh / 2;
+            dragRotateCenter.current = { x: centerX, y: centerY };
+            const initAngle = Math.atan2(
+              point.y - containerRect.top - centerY,
+              point.x - containerRect.left - centerX
+            ) * 180 / Math.PI;
+            dragInitialAngle.current = sel.rotation ? sel.rotation - initAngle : -initAngle;
+            dragInitialSelRotation.current = sel.rotation || 0;
+            _pushHistory();
+          }
+        }
+        return;
+      }
+
+      // Check inside selection
+      const selHit = hitTestSelection(point.x, point.y);
+      if (selHit && activeTool === "select") {
+        setActiveSelection(selHit);
+        setDragMode("move");
+        setIsDragging(true);
+        dragTargetSelId.current = selHit;
+        const sel = currentImage.selections.find((s) => s.id === selHit);
+        if (sel) {
+          dragSelStartRect.current = { ...sel.rect };
+          _pushHistory();
+        }
+        return;
+      }
+
+      // Brush / eraser
+      if (activeTool === "brush" || activeTool === "eraser") {
+        setDragMode(activeTool);
+        setIsDragging(true);
+        lastBrushPoint.current = screenToImage(point.x, point.y);
+        return;
+      }
+
+      // select tool → drag new rect
+      if (activeTool === "select" || activeTool === "erase-rect" || activeTool === "text") {
+        setDragMode("select");
+        setIsDragging(true);
+        // text tool on touch → left button mode
+        eraseRectButton.current = "left";
+        return;
+      }
+    },
+    [currentImage, activeTool, hitTestHandle, hitTestRotationHandle, hitTestSelection, setActiveSelection, _pushHistory, zoom, panOffset, screenToImage]
+  );
+
+  const handleTouchMove = useCallback(
+    (e: React.TouchEvent) => {
+      e.preventDefault();
+
+      // ── Two-finger pinch zoom ──
+      if (e.touches.length === 2) {
+        const dist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        if (lastPinchDist.current !== null) {
+          const scale = dist / lastPinchDist.current;
+          const newZoom = Math.max(0.1, Math.min(10, zoom * scale));
+          setZoom(newZoom);
+        }
+        lastPinchDist.current = dist;
+        return;
+      }
+      lastPinchDist.current = null;
+
+      // ── Single finger = same as mousemove ──
+      if (e.touches.length !== 1) return;
+
+      const clientX = e.touches[0].clientX;
+      const clientY = e.touches[0].clientY;
+
+      if (!isDragging) {
+        // Touch doesn't hover, so skip hover logic
+        return;
+      }
+
+      const dx = clientX - dragCurrent.x;
+      const dy = clientY - dragCurrent.y;
+      setDragCurrent({ x: clientX, y: clientY });
+
+      if (dragMode === "pan") {
+        setPanOffset({
+          x: panOffset.x + (clientX - dragStart.x),
+          y: panOffset.y + (clientY - dragStart.y),
+        });
+        setDragStart({ x: clientX, y: clientY });
+        return;
+      }
+
+      if (dragMode === "move" && dragTargetSelId.current) {
+        const imgDx = (clientX - dragCurrent.x) / zoom;
+        const imgDy = (clientY - dragCurrent.y) / zoom;
+        moveSelection(dragTargetSelId.current, imgDx, imgDy);
+        return;
+      }
+
+      if (dragMode === "resize" && dragTargetSelId.current && dragHandleIndex.current !== null && dragSelStartRect.current) {
+        const imgNow = screenToImage(clientX, clientY);
+        const orig = dragSelStartRect.current;
+        const sel = currentImage?.selections.find((s) => s.id === dragTargetSelId.current);
+        const rot = sel?.rotation || 0;
+
+        let mx = imgNow.x, my = imgNow.y;
+        if (rot) {
+          const cx = orig.x + orig.width / 2;
+          const cy = orig.y + orig.height / 2;
+          const r = (-rot * Math.PI) / 180;
+          const c = Math.cos(r), s = Math.sin(r);
+          const dx2 = imgNow.x - cx;
+          const dy2 = imgNow.y - cy;
+          mx = cx + dx2 * c - dy2 * s;
+          my = cy + dx2 * s + dy2 * c;
+        }
+
+        let newRect = { ...orig };
+        const hi = dragHandleIndex.current;
+
+        if (hi === 0) {
+          newRect.x = Math.min(mx, orig.x + orig.width);
+          newRect.y = Math.min(my, orig.y + orig.height);
+          newRect.width = orig.x + orig.width - newRect.x;
+          newRect.height = orig.y + orig.height - newRect.y;
+        } else if (hi === 1) {
+          newRect.y = Math.min(my, orig.y + orig.height);
+          newRect.height = orig.y + orig.height - newRect.y;
+        } else if (hi === 2) {
+          newRect.y = Math.min(my, orig.y + orig.height);
+          newRect.width = Math.max(5, mx - orig.x);
+          newRect.height = orig.y + orig.height - newRect.y;
+        } else if (hi === 3) {
+          newRect.width = Math.max(5, mx - orig.x);
+        } else if (hi === 4) {
+          newRect.width = Math.max(5, mx - orig.x);
+          newRect.height = Math.max(5, my - orig.y);
+        } else if (hi === 5) {
+          newRect.height = Math.max(5, my - orig.y);
+        } else if (hi === 6) {
+          newRect.x = Math.min(mx, orig.x + orig.width);
+          newRect.width = orig.x + orig.width - newRect.x;
+          newRect.height = Math.max(5, my - orig.y);
+        } else if (hi === 7) {
+          newRect.x = Math.min(mx, orig.x + orig.width);
+          newRect.width = orig.x + orig.width - newRect.x;
+        }
+
+        if (rot) {
+          const oldCx = orig.x + orig.width / 2;
+          const oldCy = orig.y + orig.height / 2;
+          const newCx = newRect.x + newRect.width / 2;
+          const newCy = newRect.y + newRect.height / 2;
+          const dxLocal = newCx - oldCx;
+          const dyLocal = newCy - oldCy;
+          const r = (rot * Math.PI) / 180;
+          const c = Math.cos(r), s = Math.sin(r);
+          const dxWorld = dxLocal * c - dyLocal * s;
+          const dyWorld = dxLocal * s + dyLocal * c;
+          newRect.x = oldCx + dxWorld - newRect.width / 2;
+          newRect.y = oldCy + dyWorld - newRect.height / 2;
+        }
+
+        updateSelection(dragTargetSelId.current, { rect: newRect });
+        return;
+      }
+
+      if (dragMode === "rotate" && dragTargetSelId.current) {
+        const sel = currentImage?.selections.find((s) => s.id === dragTargetSelId.current);
+        if (sel) {
+          const container = containerRef.current;
+          if (container) {
+            const containerRect = container.getBoundingClientRect();
+            const centerScreenX = containerRect.left + dragRotateCenter.current.x;
+            const centerScreenY = containerRect.top + dragRotateCenter.current.y;
+            const angle = Math.atan2(
+              clientY - centerScreenY,
+              clientX - centerScreenX
+            ) * 180 / Math.PI;
+            const newRotation = dragInitialAngle.current + angle;
+            updateSelection(dragTargetSelId.current, { rotation: newRotation });
+          }
+        }
+        return;
+      }
+
+      // brush/eraser
+      if ((dragMode === "brush" || dragMode === "eraser") && currentImage) {
+        const mc = maskCanvasRef.current;
+        const mctx = mc?.getContext("2d");
+        if (mc && mctx) {
+          const cur = screenToImage(clientX, clientY);
+          const prev = lastBrushPoint.current ?? cur;
+          mctx.save();
+          if (dragMode === "eraser") {
+            mctx.globalCompositeOperation = "destination-out";
+            mctx.strokeStyle = "rgba(0,0,0,1)";
+          } else {
+            mctx.globalCompositeOperation = "source-over";
+            mctx.strokeStyle = "rgba(255,80,80,1)";
+          }
+          mctx.lineCap = "round";
+          mctx.lineJoin = "round";
+          mctx.lineWidth = brushSize;
+          mctx.beginPath();
+          mctx.moveTo(prev.x, prev.y);
+          mctx.lineTo(cur.x, cur.y);
+          mctx.stroke();
+          mctx.restore();
+          lastBrushPoint.current = cur;
+        }
+      }
+    },
+    [isDragging, dragMode, dragCurrent, dragStart, panOffset, zoom, screenToImage, moveSelection, updateSelection, setPanOffset, currentImage, brushSize, setZoom]
+  );
+
+  const handleTouchEnd = useCallback(
+    (e: React.TouchEvent) => {
+      // handleMouseUp doesn't use the event — same logic applies
+      if (dragMode === "select" && isDragging && activeTool === "select") {
+        const startPt = screenToImage(dragStart.x, dragStart.y);
+        const endPt = screenToImage(dragCurrent.x, dragCurrent.y);
+
+        const rect: Rect = {
+          x: Math.min(startPt.x, endPt.x),
+          y: Math.min(startPt.y, endPt.y),
+          width: Math.abs(endPt.x - startPt.x),
+          height: Math.abs(endPt.y - startPt.y),
+        };
+
+        if (rect.width > 5 && rect.height > 5) {
+          addSelection(rect);
+        }
+      }
+
+      const editorModeNow = useAppStore.getState().editorMode;
+      if (
+        dragMode === "select" &&
+        isDragging &&
+        eraseRectButton.current === "right" &&
+        (activeTool === "text" || editorModeNow === "text")
+      ) {
+        const startPt = screenToImage(dragStart.x, dragStart.y);
+        const endPt = screenToImage(dragCurrent.x, dragCurrent.y);
+        const rect: Rect = {
+          x: Math.min(startPt.x, endPt.x),
+          y: Math.min(startPt.y, endPt.y),
+          width: Math.abs(endPt.x - startPt.x),
+          height: Math.abs(endPt.y - startPt.y),
+        };
+        if (rect.width > 8 && rect.height > 8) {
+          addSelection(rect);
+          setTimeout(() => {
+            const cur = useAppStore.getState().getCurrentImage();
+            const sel = cur?.selections[cur.selections.length - 1];
+            if (sel) {
+              useAppStore.getState().addTextBlock({
+                selectionId: sel.id,
+                text: "",
+                fontFamily: "sans-serif",
+                fontSize: 16,
+                color: "#000000",
+                bold: false,
+                italic: false,
+                underline: false,
+                alignment: "left",
+                direction: "horizontal",
+              });
+            }
+          }, 0);
+        }
+      }
+
+      if (dragMode === "select" && isDragging && activeTool === "erase-rect" && currentImage) {
+        const startPt = screenToImage(dragStart.x, dragStart.y);
+        const endPt = screenToImage(dragCurrent.x, dragCurrent.y);
+        const rect: Rect = {
+          x: Math.min(startPt.x, endPt.x),
+          y: Math.min(startPt.y, endPt.y),
+          width: Math.abs(endPt.x - startPt.x),
+          height: Math.abs(endPt.y - startPt.y),
+        };
+        if (rect.width > 8 && rect.height > 8) {
+          if (eraseRectButton.current === "right") {
+            const imgId = currentImage.id;
+            const originalDataUrl = currentImage.originalDataUrl;
+            const resultUrl = currentImage.resultDataUrl;
+            if (resultUrl) {
+              (async () => {
+                const { compositeImage } = await import("@/lib/image");
+                const restored = await compositeImage(resultUrl, originalDataUrl, rect, rect);
+                useAppStore.getState().updateImageResult(imgId, restored);
+              })();
+            }
+          } else if (eraseRectAutoMode) {
+            const conn = useAppStore.getState().connection;
+            const imgId = currentImage.id;
+            useAppStore.getState().updateImageStatus(imgId, "processing");
+            (async () => {
+              try {
+                const { inpaintRect } = await import("@/lib/inpaint");
+                const src = currentImage.resultDataUrl ?? currentImage.originalDataUrl;
+                const out = await inpaintRect(conn, src, rect);
+                useAppStore.getState().updateImageResult(imgId, out);
+                useAppStore.getState().updateImageStatus(imgId, "done");
+                useAppStore.getState().setViewMode("result");
+              } catch (err: any) {
+                useAppStore.getState().updateImageStatus(imgId, "error", err?.message ?? "inpaint failed");
+              }
+            })();
+          } else {
+            setPendingEraseRect(rect);
+          }
+        }
+      }
+
+      if ((dragMode === "resize" || dragMode === "move") && dragTargetSelId.current) {
+        // history already pushed on start
+      }
+
+      if (dragMode === "rotate" && dragTargetSelId.current) {
+        // rotation already updated live
+      }
+
+      if ((dragMode === "brush" || dragMode === "eraser") && currentImage) {
+        const mc = maskCanvasRef.current;
+        if (mc) {
+          updateImageMask(currentImage.id, mc.toDataURL("image/png"));
+        }
+        lastBrushPoint.current = null;
+      }
+
+      lastPinchDist.current = null;
+      setIsDragging(false);
+      setDragMode("none");
+      dragTargetSelId.current = null;
+      dragHandleIndex.current = null;
+      dragSelStartRect.current = null;
+      dragInitialAngle.current = 0;
+      dragInitialSelRotation.current = 0;
+    },
+    [dragMode, isDragging, activeTool, dragStart, dragCurrent, screenToImage, addSelection, currentImage, updateImageMask, eraseRectAutoMode, setPendingEraseRect]
+  );
+
   // 滚轮：默认缩放，Ctrl+滚轮 缩放（细粒度），Shift+滚轮 调画笔大小
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
@@ -1125,10 +1531,13 @@ export default function Canvas() {
     <div
       ref={containerRef}
       className="canvas-container flex-1 relative"
-      style={{ cursor: getCursor() }}
+      style={{ cursor: getCursor(), touchAction: "none" }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
       onMouseLeave={() => {
         setIsDragging(false);
         setDragMode("none");

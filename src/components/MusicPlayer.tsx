@@ -310,7 +310,7 @@ export default function MusicPlayer() {
 
         {/* 展开状态 */}
         {expanded && (
-          <div className="px-4 py-3 space-y-3">
+          <div className="px-4 py-3 max-md:px-2 max-md:py-2 space-y-3">
             {/* Header */}
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
@@ -404,7 +404,7 @@ export default function MusicPlayer() {
 
             {/* 上传按钮 */}
             <div className="flex gap-2 pt-1">
-              <label className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-sidebar-accent text-sidebar-foreground hover:bg-sidebar-accent/80 cursor-pointer transition-colors">
+              <label className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs max-md:text-[10px] font-medium rounded-lg bg-sidebar-accent text-sidebar-foreground hover:bg-sidebar-accent/80 cursor-pointer transition-colors">
                 <Upload className="w-3.5 h-3.5" />
                 上传音乐
                 <input
@@ -415,7 +415,7 @@ export default function MusicPlayer() {
                   onChange={(e) => e.target.files && loadFiles(e.target.files)}
                 />
               </label>
-              <label className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-sidebar-accent text-sidebar-foreground hover:bg-sidebar-accent/80 cursor-pointer transition-colors">
+              <label className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs max-md:text-[10px] font-medium rounded-lg bg-sidebar-accent text-sidebar-foreground hover:bg-sidebar-accent/80 cursor-pointer transition-colors">
                 <FolderOpen className="w-3.5 h-3.5" />
                 上传文件夹
                 <input
@@ -427,7 +427,7 @@ export default function MusicPlayer() {
                   onChange={(e) => e.target.files && loadFiles(e.target.files)}
                 />
               </label>
-              <label className="flex items-center justify-center gap-1 px-3 py-2 text-xs font-medium rounded-lg border border-border text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors">
+              <label className="flex items-center justify-center gap-1 px-3 py-2 text-xs max-md:text-[10px] font-medium rounded-lg border border-border text-sidebar-foreground hover:bg-sidebar-accent/50 cursor-pointer transition-colors">
                 歌词
                 <input
                   ref={lrcInputRef}

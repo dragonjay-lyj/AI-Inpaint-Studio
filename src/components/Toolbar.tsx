@@ -141,6 +141,7 @@ export default function Toolbar() {
       className={cn(
         "flex h-12 w-full items-center justify-between gap-2",
         "border-b border-border bg-sidebar/50 px-3 select-none",
+        "max-md:h-10 max-md:px-2 max-md:gap-1",
       )}
     >
       {/* ── Left section: Navigation & File ── */}
@@ -191,10 +192,10 @@ export default function Toolbar() {
         {/* Separator */}
         <div className="w-px h-5 bg-border mx-1" />
 
-        {/* File name */}
+        {/* File name — hidden on mobile */}
         <span
           className={cn(
-            "text-xs text-muted-foreground truncate max-w-[160px]",
+            "text-xs text-muted-foreground truncate max-w-[160px] max-md:hidden",
             !currentImage && "opacity-40",
           )}
         >
@@ -258,8 +259,8 @@ export default function Toolbar() {
         </button>
       </div>
 
-      {/* ── Tool selection ── */}
-      <div className="flex items-center gap-0.5">
+      {/* ── Tool selection (hidden on mobile) ── */}
+      <div className="flex items-center gap-0.5 max-md:hidden">
         {(
           [
             { tool: "select" as const, icon: MousePointer2, label: "toolbar.select" },

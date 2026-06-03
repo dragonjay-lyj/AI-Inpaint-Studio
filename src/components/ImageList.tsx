@@ -30,7 +30,7 @@ export default function ImageList() {
   // ── Empty state ────────────────────────────────────────────
   if (images.length === 0) {
     return (
-      <div className="flex h-[100px] items-center justify-center bg-sidebar/50 border-t">
+      <div className="flex h-[100px] max-md:h-[60px] items-center justify-center bg-sidebar/50 border-t">
         <div className="flex flex-col items-center gap-1 text-muted-foreground select-none">
           <ImageIcon className="size-6" />
           <p className="text-sm">{t("batch.none", language)}</p>
@@ -43,7 +43,7 @@ export default function ImageList() {
   // ── Thumbnail strip ────────────────────────────────────────
   return (
     <LayoutGroup>
-      <div className="flex h-[100px] items-center gap-1 overflow-x-auto bg-sidebar/50 border-t px-2 scroll-smooth">
+      <div className="flex h-[100px] max-md:h-[60px] items-center gap-1 overflow-x-auto bg-sidebar/50 border-t px-2 scroll-smooth">
         {images.map((image) => {
           const isActive = image.id === currentImageId;
 
@@ -58,7 +58,7 @@ export default function ImageList() {
               whileTap={{ scale: 0.95 }}
               transition={{ type: "spring", stiffness: 400, damping: 25 }}
               className={cn(
-                "relative shrink-0 size-16 rounded-md overflow-hidden cursor-pointer transition-shadow",
+                "relative shrink-0 size-16 max-md:size-10 rounded-md overflow-hidden cursor-pointer transition-shadow",
                 "hover:ring-2 hover:ring-primary/50",
                 isActive && "ring-2 ring-primary ring-offset-1",
               )}

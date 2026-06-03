@@ -434,7 +434,7 @@ export default function Sidebar() {
 
   return (
     <aside
-      className="w-80 h-full flex flex-col bg-sidebar border-r border-sidebar-border overflow-hidden shrink-0"
+      className="w-80 max-md:w-full h-full flex flex-col bg-sidebar border-r border-sidebar-border overflow-hidden shrink-0 max-md:absolute max-md:inset-0 max-md:z-50"
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
     >
