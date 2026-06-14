@@ -3,7 +3,13 @@
 // 优先使用 Gemini 视觉做检测/识别，离线/未配置时回退到边缘检测
 // ============================================================
 
-import type { ConnectionConfig, Rect } from "@/types";
+import type { ConnectionConfig, Point, Rect } from "@/types";
+
+/** 多边形检测结果：包含 bbox 和原始顶点（用于异形气泡） */
+export interface PolygonRegion {
+  bbox: Rect;
+  points: Point[];
+}
 
 /**
  * 通过 Gemini 视觉识别图像区域中的文字。
@@ -113,6 +119,91 @@ export async function detectTextRegionsWithAI(
     console.warn("[OCR] AI detect failed, falling back to edge detection:", err);
     return detectTextRegions(imageDataUrl);
   }
+}
+
+/**
+ * 通过 Gemini 让模型输出每个文字区域的多边形顶点（适合异形气泡）。
+ * 失败时回退到 bbox 然后用矩形 4 角作多边形。
+ */
+export async function detectTextPolygonsWithAI(
+  config: ConnectionConfig | undefined,
+  imageDataUrl: string
+): Promise<PolygonRegion[]> {
+  if (!config?.apiKey || config.provider !== "gemini") {
+    const rects = await detectTextRegions(imageDataUrl);
+    return rectsToPolygons(rects);
+  }
+  try {
+    const dims = await imageDimensions(imageDataUrl);
+    const base64 = imageDataUrl.split(",")[1];
+    const mime = imageDataUrl.startsWith("data:image/png") ? "image/png" : "image/jpeg";
+    const rawBase = config.baseUrl || "https://generativelanguage.googleapis.com/v1beta";
+    const normalizedBase = rawBase.replace(/\/+$/, "");
+    const baseUrl = normalizedBase.includes("/v1beta") ? normalizedBase : `${normalizedBase}/v1beta`;
+    const ocrModel = config.model && !/image/i.test(config.model) ? config.model : "gemini-2.5-flash";
+    const url = `${baseUrl}/models/${ocrModel}:generateContent?key=${config.apiKey}`;
+    const body = {
+      contents: [
+        {
+          parts: [
+            { text: `Detect ALL text regions in this image (size: ${dims.width} x ${dims.height} px). For each region output a polygon in pixel coordinates that tightly follows the bubble or text container shape.\nOutput ONLY a JSON array, no markdown, no prose:\n[{"points":[[x1,y1],[x2,y2],[x3,y3],...]}]\nUse 4-12 vertices per polygon. Vertices must be in order (clockwise or counterclockwise).` },
+            { inlineData: { mimeType: mime, data: base64 } },
+          ],
+        },
+      ],
+      generationConfig: { temperature: 0 },
+    };
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    const txt: string = (data.candidates?.[0]?.content?.parts ?? [])
+      .filter((p: any) => p.text)
+      .map((p: any) => p.text)
+      .join("");
+    const m = txt.match(/\[[\s\S]*\]/);
+    if (!m) throw new Error("No JSON array in response");
+    const parsed = JSON.parse(m[0]);
+    if (!Array.isArray(parsed)) throw new Error("Not an array");
+    const out: PolygonRegion[] = [];
+    for (const r of parsed) {
+      const pts = Array.isArray(r?.points) ? r.points : null;
+      if (!pts || pts.length < 3) continue;
+      const points: Point[] = pts
+        .map((p: any) => Array.isArray(p) && p.length >= 2 ? { x: Number(p[0]), y: Number(p[1]) } : null)
+        .filter((p: Point | null): p is Point => !!p && Number.isFinite(p.x) && Number.isFinite(p.y));
+      if (points.length < 3) continue;
+      const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
+      const bbox: Rect = {
+        x: Math.max(0, Math.min(...xs)),
+        y: Math.max(0, Math.min(...ys)),
+        width: Math.max(...xs) - Math.min(...xs),
+        height: Math.max(...ys) - Math.min(...ys),
+      };
+      if (bbox.width > 0 && bbox.height > 0) out.push({ bbox, points });
+    }
+    return out;
+  } catch (err) {
+    console.warn("[OCR] AI polygon detect failed, falling back to bbox:", err);
+    const rects = await detectTextRegions(imageDataUrl);
+    return rectsToPolygons(rects);
+  }
+}
+
+function rectsToPolygons(rects: Rect[]): PolygonRegion[] {
+  return rects.map((r) => ({
+    bbox: r,
+    points: [
+      { x: r.x, y: r.y },
+      { x: r.x + r.width, y: r.y },
+      { x: r.x + r.width, y: r.y + r.height },
+      { x: r.x, y: r.y + r.height },
+    ],
+  }));
 }
 
 async function cropToDataUrl(src: string, rect: Rect): Promise<string> {

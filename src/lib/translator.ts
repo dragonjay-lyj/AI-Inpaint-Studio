@@ -4,12 +4,13 @@
 // ============================================================
 
 import type { ConnectionConfig } from "@/types";
+import { getTranslatorBackend } from "./translator-backends";
 
 /**
  * Translate text using the configured AI API.
  *
- * Supports Gemini, OpenAI, and Sakura backends.
- * Falls back to a mock translation when no API key is configured.
+ * Dispatches to a TranslatorBackend (Gemini/OpenAI/Vertex/Sakura/DeepL/...) by provider id.
+ * Falls back to a mock translation when no API key is configured or backend is unknown.
  */
 export async function translateText(
   text: string,
@@ -19,99 +20,18 @@ export async function translateText(
 ): Promise<string> {
   if (!text.trim()) return "";
 
-  // When no valid API key, return a mock translation
-  if (!config.apiKey) {
+  const backend = getTranslatorBackend(config.provider);
+  if (!backend || (backend.requiresApiKey && !config.apiKey)) {
     return mockTranslate(text, sourceLang, targetLang);
   }
 
   try {
     const systemPrompt = `You are a professional translator. Translate the following text from ${sourceLang === "auto" ? "the detected source language" : sourceLang} to ${targetLang}. Return ONLY the translated text, no explanations, no markdown, no quotes.`;
-
-    if (config.provider === "gemini") {
-      return await translateViaGemini(text, systemPrompt, config);
-    } else if (config.provider === "openai" || config.provider === "custom") {
-      return await translateViaOpenAI(text, systemPrompt, config);
-    } else {
-      // Sakura or unknown — use Gemini as default
-      return await translateViaGemini(text, systemPrompt, config);
-    }
-  } catch {
-    // Fallback to mock on error
+    return await backend.translate(text, systemPrompt, config);
+  } catch (err) {
+    console.warn("[translateText] backend failed, falling back to mock:", err);
     return mockTranslate(text, sourceLang, targetLang);
   }
-}
-
-/**
- * Translate via Gemini API.
- */
-async function translateViaGemini(
-  text: string,
-  systemPrompt: string,
-  config: ConnectionConfig,
-): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model || "gemini-2.0-flash"}:generateContent?key=${config.apiKey}`;
-
-  const body = {
-    contents: [
-      {
-        parts: [{ text: `${systemPrompt}\n\nText to translate:\n${text}` }],
-      },
-    ],
-  };
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Gemini translation API error ${response.status}`);
-  }
-
-  const data = await response.json();
-  const result = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  return result.trim();
-}
-
-/**
- * Translate via OpenAI-compatible API.
- */
-async function translateViaOpenAI(
-  text: string,
-  systemPrompt: string,
-  config: ConnectionConfig,
-): Promise<string> {
-  const url = config.baseUrl
-    ? `${config.baseUrl.replace(/\/$/, "")}/chat/completions`
-    : "https://api.openai.com/v1/chat/completions";
-
-  const body = {
-    model: config.model || "gpt-4o-mini",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: text },
-    ],
-    max_tokens: 4096,
-  };
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
-  });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI translation API error ${response.status}`);
-  }
-
-  const data = await response.json();
-  return (data.choices?.[0]?.message?.content ?? "").trim();
 }
 
 /**
@@ -367,13 +287,15 @@ export async function translateWithContext(
   sourceLang: string,
   targetLang: string,
   config: ConnectionConfig,
-  contextWindow: number = 10
+  contextWindow: number = 10,
+  glossaryTopN: number = 15
 ): Promise<string> {
   const c = ensureChapter(activeChapterId);
   const contextStr = c.previousTexts.slice(-contextWindow).join("\n");
-  const glossaryStr = Object.entries(c.termGlossary)
-    .map(([k, v]) => `${k}=${v}`)
-    .join(", ");
+
+  // 加权评分：只挑出当前 text 最相关的 top-N 个术语进入 prompt
+  const ranked = rankGlossaryEntries(text, c.termGlossary, glossaryTopN);
+  const glossaryStr = ranked.map(([k, v]) => `${k}=${v}`).join(", ");
 
   const contextualPrompt =
     (contextStr ? `Previous translations (for tone & terminology consistency):\n${contextStr}\n\n` : "") +
@@ -383,4 +305,53 @@ export async function translateWithContext(
   const result = await translateText(contextualPrompt, sourceLang, targetLang, config);
   addToContext(text, result);
   return result;
+}
+
+/**
+ * 给术语库做加权评分检索：
+ *   分数 = 在 text 中的出现次数(TF) + 长度奖励 + 在术语库整体频率惩罚(IDF lite)
+ * 返回按分数降序的 top-N 术语对。
+ *
+ * 这是显式可调的"加权评分替代 embedding"——架构原则 #6 的落地。
+ */
+export function rankGlossaryEntries(
+  text: string,
+  glossary: Record<string, string>,
+  topN: number = 15
+): Array<[string, string]> {
+  const entries = Object.entries(glossary);
+  if (entries.length === 0) return [];
+  if (entries.length <= topN) {
+    // 不需要排，但仍按出现优先排序便于一致性
+    return rank(entries, text).slice(0, topN);
+  }
+  return rank(entries, text).slice(0, topN);
+}
+
+function rank(entries: Array<[string, string]>, text: string): Array<[string, string]> {
+  const scores: Array<{ kv: [string, string]; score: number }> = [];
+  const lowerText = text.toLowerCase();
+  for (const [k, v] of entries) {
+    const term = k.toLowerCase();
+    if (!term) continue;
+    // TF: 出现次数（用 indexOf 走全部）
+    let count = 0;
+    let idx = 0;
+    while ((idx = lowerText.indexOf(term, idx)) !== -1) {
+      count++;
+      idx += term.length;
+    }
+    // 长度奖励：长术语命中权重更高（避免 "a"/"the" 抢分）
+    const lenBonus = Math.log2(1 + term.length);
+    // 第一次出现位置越靠前越相关
+    const firstIdx = lowerText.indexOf(term);
+    const posBonus = firstIdx >= 0 ? Math.max(0, 1 - firstIdx / Math.max(1, lowerText.length)) : 0;
+    const score = count * 2 + (count > 0 ? lenBonus + posBonus : 0);
+    scores.push({ kv: [k, v], score });
+  }
+  scores.sort((a, b) => b.score - a.score);
+  // 没命中的术语保留少量，作为兜底（避免空 glossary）
+  const hit = scores.filter((s) => s.score > 0);
+  const miss = scores.filter((s) => s.score === 0);
+  return [...hit, ...miss].map((s) => s.kv);
 }

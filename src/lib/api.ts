@@ -46,6 +46,13 @@ function parseMeta(text: string): { source?: string; target?: string } | undefin
  * 翻译模式允许字符数变化、允许重新排版；编辑模式保持原样式。
  */
 function inferPromptMode(userPrompt: string): "translate" | "edit" {
+  // 显式 mode 标记优先（UI 强制指定时使用）
+  const explicit = userPrompt.match(/^\s*\[MODE:(translate|edit|remove-watermark)\]/i);
+  if (explicit) {
+    const m = explicit[1].toLowerCase();
+    if (m === "translate") return "translate";
+    return "edit"; // edit / remove-watermark 都走编辑模式
+  }
   const txt = (userPrompt || "").toLowerCase();
   // 中文/英文翻译关键词
   const translateKw = /(翻译|译|嵌字|中译|日译|英译|translate|translation|chinese|english|japanese|korean|中文|日文|英文|韩文|韩语|日语|英语)/i;
@@ -54,16 +61,37 @@ function inferPromptMode(userPrompt: string): "translate" | "edit" {
   return "edit";
 }
 
-function buildGeminiPromptText(userPrompt: string): string {
+/** 去掉 [MODE:xxx] 前缀，给模型实际看到的 prompt */
+function stripModeMarker(userPrompt: string): string {
+  return userPrompt.replace(/^\s*\[MODE:(translate|edit|remove-watermark)\]\s*/i, "");
+}
+
+/**
+ * 用 OCR 结果反推源语言。返回的标签直接拼到 prompt 里给模型当 hint。
+ */
+function detectLanguageFromOCR(ocrText: string): string | null {
+  if (!ocrText) return null;
+  if (/[぀-ゟ゠-ヿ]/.test(ocrText)) return "Japanese";
+  if (/[가-힯]/.test(ocrText)) return "Korean";
+  if (/[一-鿿]/.test(ocrText)) return "Chinese";
+  if (/[Ѐ-ӿ]/.test(ocrText)) return "Russian";
+  if (/[؀-ۿ]/.test(ocrText)) return "Arabic";
+  if (/[a-zA-Z]/.test(ocrText)) return "English";
+  return null;
+}
+
+function buildGeminiPromptText(userPrompt: string, sourceLang?: string | null): string {
   const mode = inferPromptMode(userPrompt);
+  const cleaned = stripModeMarker(userPrompt);
+  const langHint = sourceLang ? `\nSOURCE LANGUAGE DETECTED: ${sourceLang}. You must replace ALL ${sourceLang} text in the image with the target language.\n` : "";
   if (mode === "translate") {
     return `You are a manga/comic localization artist. The whole image you receive IS the region to edit (already cropped, with some surrounding context for visual reference).
 
-USER REQUEST: ${userPrompt}
+USER REQUEST: ${cleaned}${langHint}
 
 TRANSLATION RULES (must follow):
 1. Translate faithfully. Character count WILL differ between languages — that is expected, do NOT pad or shorten.
-2. Replace ALL source-language text with the target language. Do NOT keep original Japanese/source characters unless they are proper nouns the user explicitly asked to keep.
+2. Replace ALL source-language text with the target language. Do NOT keep original Japanese/Korean/source characters unless they are proper nouns the user explicitly asked to keep.
 3. You MAY re-layout text: vertical Japanese / Korean can become horizontal Chinese / English when natural. Adjust line breaks for the target language's reading flow.
 4. Match the source's visual feel (similar weight, color, ballpark size) but do not pixel-lock the original metrics — readability of the translation matters more.
 5. Do NOT touch background, art, or any non-text pixels outside the original text region.
@@ -73,10 +101,9 @@ After generating the image, output ONE plain-text line in this exact format (no 
 META source="<the original text you saw, verbatim>" target="<the translated text you wrote>"`;
   }
 
-  // 编辑模式：保持原样式（去水印 / 改细节 / 替换对象）
   return `You are editing a cropped image region. The whole image you receive IS the region to edit (it already contains some surrounding context for visual reference).
 
-INSTRUCTION: ${userPrompt}
+INSTRUCTION: ${cleaned}
 
 EDIT RULES (must follow):
 1. Preserve the original visual style of unchanged areas (font, color, lighting, texture).
@@ -226,7 +253,7 @@ async function callOpenAIAPI(
         content: [
           {
             type: "text",
-            text: `Instruction: ${prompt}. Return the edited image (same dimensions as the input).`,
+            text: `Instruction: ${stripModeMarker(prompt)}. Return the edited image (same dimensions as the input).`,
           },
           {
             type: "image_url",
@@ -393,6 +420,127 @@ export async function callAIWithDegradation(
     }
     throw err;
   }
+}
+
+/**
+ * 自我审查循环：
+ * 1) 第一轮 callAI 拿到结果
+ * 2) 用 Gemini OCR 实测生成图里有什么文字
+ * 3) 检查是否仍含源语言字符（日/韩）+ 与 meta.target 字符数偏差是否过大
+ * 4) 若有问题，把问题描述追加为额外约束（不替换原 prompt），再调一次
+ * 5) 最多 maxRounds 轮（默认 2）
+ * 任何一步失败都直接返回当前结果（优雅降级）。
+ */
+export async function callAIWithSelfReview(
+  config: ConnectionConfig,
+  originalImageBase64: string,
+  maskRegion: Rect,
+  prompt: string,
+  maxRounds: number = 2,
+  onRound?: (round: number, issue: string | null) => void
+): Promise<AIResult & { reviewRounds?: number; reviewIssues?: string[]; sourceLang?: string }> {
+  const issues: string[] = [];
+  let augmentedPrompt = prompt;
+  let lastResult: AIResult | null = null;
+  let detectedSourceLang: string | null = null;
+
+  // 翻译模式下，先用 OCR 探一下源语言（仅 Gemini provider 才能做）
+  if (inferPromptMode(prompt) === "translate" && config.provider === "gemini") {
+    try {
+      const { recognizeTextWithAI } = await import("./ocr");
+      const sourceText = await recognizeTextWithAI(config, originalImageBase64, {
+        x: 0, y: 0, width: maskRegion.width, height: maskRegion.height,
+      }, "auto");
+      detectedSourceLang = detectLanguageFromOCR(sourceText);
+      if (detectedSourceLang) {
+        augmentedPrompt = `${prompt}\n\n[CONTEXT] Source language detected as ${detectedSourceLang}. Replace all ${detectedSourceLang} text with the target language.`;
+      }
+    } catch (err) {
+      console.warn("[SelfReview] Source language detection failed, proceeding without:", err);
+    }
+  }
+
+  for (let round = 0; round < maxRounds; round++) {
+    onRound?.(round, issues[issues.length - 1] || null);
+    const result = await callAIWithDegradation(config, originalImageBase64, maskRegion, augmentedPrompt);
+    lastResult = result;
+
+    // 仅翻译模式做审查（编辑模式没有"目标文字应该是什么"的概念）
+    const mode = inferPromptMode(prompt);
+    if (mode !== "translate") break;
+
+    // OCR 实测生成图里残留的文字
+    let ocrText = "";
+    try {
+      const { recognizeTextWithAI } = await import("./ocr");
+      ocrText = await recognizeTextWithAI(config, result.imageDataUrl, {
+        x: 0, y: 0, width: maskRegion.width, height: maskRegion.height,
+      }, "auto");
+    } catch (err) {
+      console.warn("[SelfReview] OCR check failed, accepting result:", err);
+      break;
+    }
+
+    const issue = detectTranslationIssues(ocrText, result.meta);
+    if (!issue) break;
+
+    issues.push(issue);
+    if (round === maxRounds - 1) break;
+
+    // 追加约束（累积）
+    augmentedPrompt = `${augmentedPrompt}\n\n[REVIEW FEEDBACK round ${round + 1}] Your previous output had this issue: ${issue}. Fix it in the next attempt. Do NOT regress on previous fixes.`;
+  }
+
+  return {
+    imageDataUrl: lastResult!.imageDataUrl,
+    meta: lastResult!.meta,
+    reviewRounds: issues.length,
+    reviewIssues: issues,
+    sourceLang: detectedSourceLang || undefined,
+  };
+}
+
+/**
+ * 检查 OCR 结果是否还有源语言字符 + 与期望译文长度是否偏差过大。
+ * 返回问题描述（可作为追加约束），无问题返回 null。
+ */
+function detectTranslationIssues(ocrText: string, meta?: { source?: string; target?: string }): string | null {
+  if (!ocrText) return null;
+  const text = ocrText.trim();
+
+  // 1) 检查是否还含日韩源字符
+  const hiragana = /[぀-ゟ]/;
+  const katakana = /[゠-ヿ]/;
+  const hangul = /[가-힯]/;
+
+  // target 是否说期望中文/英文
+  const target = meta?.target || "";
+  const wantsChinese = /[一-鿿]/.test(target);
+  const wantsLatin = /^[\x00-\x7f\s]+$/.test(target);
+
+  if (hiragana.test(text) || katakana.test(text)) {
+    if (wantsChinese || wantsLatin) {
+      const sample = text.match(/[぀-ヿ]+/g)?.[0]?.slice(0, 12) || "japanese kana";
+      return `the output image still contains Japanese kana characters (e.g. "${sample}"). All source-language text must be replaced with the target language.`;
+    }
+  }
+  if (hangul.test(text) && (wantsChinese || wantsLatin)) {
+    return "the output image still contains Korean Hangul characters. All source-language text must be replaced with the target language.";
+  }
+
+  // 2) 长度漂移：OCR 出来的字符数与 meta.target 偏差超 3 倍
+  if (target) {
+    const ocrLen = [...text].length;
+    const tgtLen = [...target].length;
+    if (tgtLen > 0 && ocrLen > tgtLen * 3) {
+      return `the output image text is much longer (${ocrLen} chars) than the intended translation (${tgtLen} chars). You may have left untranslated source text in the image.`;
+    }
+    if (tgtLen > 4 && ocrLen < tgtLen * 0.3) {
+      return `the output image text is much shorter (${ocrLen} chars) than the intended translation (${tgtLen} chars). The translation appears to be missing characters.`;
+    }
+  }
+
+  return null;
 }
 
 /**

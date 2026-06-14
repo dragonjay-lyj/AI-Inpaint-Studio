@@ -107,6 +107,9 @@ interface AppState {
   eraseRectAutoMode: boolean;
   pendingEraseRect: Rect | null;
 
+  // Prompt 模式：auto 走正则猜，其他强制
+  promptMode: 'auto' | 'translate' | 'edit' | 'remove-watermark';
+
   // 编辑器模式
   editorMode: EditorMode;
   sketchOpacity: number;
@@ -126,6 +129,7 @@ interface AppState {
   updateImageResult: (id: string, resultDataUrl: string) => void;
   updateImageStatus: (id: string, status: ImageEntry["status"], error?: string) => void;
   updateImageMask: (id: string, maskDataUrl: string | undefined) => void;
+  updateImageQuality: (id: string, quality: number, issues?: string[]) => void;
   navigateImage: (direction: "next" | "prev") => void;
 
   // 选区操作
@@ -179,6 +183,7 @@ interface AppState {
   setBrushSize: (size: number) => void;
   setEraseRectAutoMode: (v: boolean) => void;
   setPendingEraseRect: (r: Rect | null) => void;
+  setPromptMode: (m: 'auto' | 'translate' | 'edit' | 'remove-watermark') => void;
 
   // 视图控制
   setViewMode: (mode: "original" | "result") => void;
@@ -247,6 +252,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   brushSize: 20,
   eraseRectAutoMode: true,
   pendingEraseRect: null,
+  promptMode: 'auto',
   editorMode: "default",
   sketchOpacity: 0.5,
   textBlocks: [],
@@ -294,6 +300,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => ({
       images: state.images.map((img) =>
         img.id === id ? { ...img, maskDataUrl } : img
+      ),
+    })),
+
+  updateImageQuality: (id, quality, issues) =>
+    set((state) => ({
+      images: state.images.map((img) =>
+        img.id === id ? { ...img, quality, qualityIssues: issues } : img
       ),
     })),
 
@@ -633,6 +646,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setBrushSize: (size) => set({ brushSize: Math.max(1, Math.min(100, size)) }),
   setEraseRectAutoMode: (v) => set({ eraseRectAutoMode: v }),
   setPendingEraseRect: (r) => set({ pendingEraseRect: r }),
+  setPromptMode: (m) => set({ promptMode: m }),
 
   // ── 视图 ──
   setViewMode: (mode) => set({ viewMode: mode }),
@@ -654,3 +668,55 @@ export const useAppStore = create<AppState>((set, get) => ({
     return state.images.find((img) => img.id === state.currentImageId);
   },
 }));
+
+// ── IndexedDB 持久化 ─────────────────────────────────────────
+// 仅在浏览器中订阅 images 变化并 debounce 写盘
+if (typeof window !== "undefined") {
+  let prevImages: ImageEntry[] | null = null;
+  useAppStore.subscribe((state) => {
+    if (state.images !== prevImages) {
+      prevImages = state.images;
+      // 异步加载以避免初始化循环
+      import("./persistence").then(({ saveImages }) => saveImages(state.images, 800));
+    }
+  });
+}
+
+/**
+ * 启动时从 IndexedDB 恢复 images。在 page.tsx useEffect 里调用。
+ */
+export async function hydrateFromIndexedDB(): Promise<void> {
+  if (typeof window === "undefined") return;
+  try {
+    const { loadImages } = await import("./persistence");
+    const persisted = await loadImages();
+    if (persisted.length === 0) return;
+    const state = useAppStore.getState();
+    if (state.images.length > 0) return; // 用户已有数据，不覆盖
+    // processing 状态在重启后没有意义（后台任务已死），降级为 idle
+    const restored: ImageEntry[] = persisted.map((img) =>
+      img.status === "processing" ? { ...img, status: "idle" } : img
+    );
+    useAppStore.setState({
+      images: restored,
+      currentImageId: restored[0]?.id ?? null,
+    });
+  } catch (err) {
+    console.warn("[store] hydrate failed:", err);
+  }
+}
+
+/**
+ * 检测是否有"未完成"的图片：
+ * - 有 selections 但还没 resultDataUrl
+ * - 之前是 processing 被降级为 idle
+ */
+export function getUnfinishedImages(): ImageEntry[] {
+  const state = useAppStore.getState();
+  return state.images.filter(
+    (img) =>
+      (img.selections?.length || 0) > 0 &&
+      !img.resultDataUrl &&
+      img.status !== "error"
+  );
+}

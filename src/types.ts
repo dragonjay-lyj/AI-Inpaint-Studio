@@ -30,7 +30,7 @@ export interface Selection {
 }
 
 /** 支持的 AI 提供商 */
-export type ProviderType = 'gemini' | 'openai' | 'custom' | 'gpt-image';
+export type ProviderType = 'gemini' | 'openai' | 'custom' | 'gpt-image' | 'vertex' | 'sakura' | 'deepl';
 
 /** API 连接配置 */
 export interface ConnectionConfig {
@@ -62,6 +62,10 @@ export interface ImageEntry {
   status: 'idle' | 'processing' | 'done' | 'error';
   error?: string;
   globalPrompt: string;     // 全局提示词（应用到所有选区）
+  /** 质量分 0-1。基于审查轮数 + 长度漂移 + 是否含残留源语言字符 */
+  quality?: number;
+  /** 质量评分附带的具体问题（用于 tooltip） */
+  qualityIssues?: string[];
 }
 
 /** 应用全局配置 */

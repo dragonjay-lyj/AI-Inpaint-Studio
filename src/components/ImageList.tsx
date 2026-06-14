@@ -104,6 +104,28 @@ export default function ImageList() {
                   )}
                 </span>
               )}
+
+              {/* Quality bar — 仅在 done 后显示 */}
+              {image.status === "done" && typeof image.quality === "number" && (
+                <span
+                  className="absolute bottom-0 left-0 right-0 h-1 bg-black/30"
+                  title={
+                    image.qualityIssues && image.qualityIssues.length > 0
+                      ? `质量 ${(image.quality * 100).toFixed(0)}% — ${image.qualityIssues.join("；")}`
+                      : `质量 ${(image.quality * 100).toFixed(0)}%`
+                  }
+                >
+                  <span
+                    className={cn(
+                      "block h-full transition-all",
+                      image.quality >= 0.8 ? "bg-green-500"
+                        : image.quality >= 0.5 ? "bg-yellow-500"
+                        : "bg-red-500"
+                    )}
+                    style={{ width: `${image.quality * 100}%` }}
+                  />
+                </span>
+              )}
             </motion.div>
           );
         })}

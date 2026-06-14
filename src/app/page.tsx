@@ -1,8 +1,8 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useState } from "react";
-import { useAppStore } from "@/lib/store";
+import { useEffect, useState } from "react";
+import { useAppStore, hydrateFromIndexedDB } from "@/lib/store";
 import { Menu, X } from "lucide-react";
 
 // Dynamically import heavy components
@@ -12,11 +12,15 @@ const Canvas = dynamic(() => import("@/components/Canvas"), { ssr: false });
 const ImageList = dynamic(() => import("@/components/ImageList"), { ssr: false });
 const Onboarding = dynamic(() => import("@/components/Onboarding"), { ssr: false });
 const MusicPlayer = dynamic(() => import("@/components/MusicPlayer"), { ssr: false });
+const FindReplace = dynamic(() => import("@/components/FindReplace"), { ssr: false });
 
 export default function Home() {
   const showOnboarding = useAppStore((s) => s.showOnboarding);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const toggleSidebar = () => setMobileSidebarOpen((prev) => !prev);
+
+  // 启动时从 IndexedDB 恢复批量任务
+  useEffect(() => { hydrateFromIndexedDB(); }, []);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
@@ -64,6 +68,9 @@ export default function Home() {
 
       {/* Onboarding overlay */}
       {showOnboarding && <Onboarding />}
+
+      {/* Find / Replace overlay */}
+      <FindReplace />
 
       {/* Music Player — fixed bottom bar */}
       <MusicPlayer />

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(npx tsc *)",
-      "Bash(npx eslint *)"
+      "Bash(npx eslint *)",
+      "WebFetch(domain:github.com)",
+      "Bash(grep *)"
     ]
   }
 }

@@ -38,6 +38,26 @@ function checkLengthDrift(meta?: { source?: string; target?: string }): string |
   return null;
 }
 
+/**
+ * 计算质量分 0-1：
+ * - 起点 1.0
+ * - 每个 warning 扣 0.15
+ * - 每轮自我审查扣 0.2（说明第一轮没过）
+ * - 下限 0.1
+ */
+function computeQuality(warningCount: number, reviewRounds: number): number {
+  let q = 1 - warningCount * 0.15 - reviewRounds * 0.2;
+  return Math.max(0.1, Math.min(1, q));
+}
+
+/**
+ * 给 prompt 加上 [MODE:xxx] 前缀（仅当 promptMode != 'auto'）
+ */
+function applyPromptMode(prompt: string, mode: 'auto' | 'translate' | 'edit' | 'remove-watermark'): string {
+  if (mode === 'auto') return prompt;
+  return `[MODE:${mode}] ${prompt}`;
+}
+
 // ============================================================
 // Collapsible Section
 // ============================================================
@@ -233,17 +253,18 @@ export default function Sidebar() {
     setIsProcessing(true);
     updateImageStatus(current.id, "processing");
 
-    const { callAI } = await import("@/lib/api");
+    const { callAIWithSelfReview } = await import("@/lib/api");
     const { compositeImage, extractRegion } = await import("@/lib/image");
 
     try {
       // Process each selection — 只上传选区内容
       let resultUrl = current.resultDataUrl || current.originalDataUrl;
       const warnings: string[] = [];
+      let totalReviewRounds = 0;
 
       for (const sel of current.selections) {
         if (sel.processed) continue; // 跳过已翻译的选区
-        const prompt = sel.prompt || globalPrompt || "Edit this region naturally";
+        const prompt = applyPromptMode(sel.prompt || globalPrompt || "Edit this region naturally", store.promptMode);
 
         // 裁剪出选区图片，只发送选区内容给模型
         const { regionDataUrl, expandedRect } = await extractRegion(
@@ -257,10 +278,14 @@ export default function Sidebar() {
           width: sel.rect.width,
           height: sel.rect.height,
         };
-        const aiResult = await callAI(connection, regionDataUrl, cropRect, prompt);
+        const aiResult = await callAIWithSelfReview(connection, regionDataUrl, cropRect, prompt, 2);
 
         const lenWarn = checkLengthDrift(aiResult.meta);
         if (lenWarn) warnings.push(lenWarn);
+        if (aiResult.reviewRounds && aiResult.reviewRounds > 0) {
+          warnings.push(`经 ${aiResult.reviewRounds} 轮审查`);
+          totalReviewRounds += aiResult.reviewRounds;
+        }
 
         // 只把用户原始选区 (sel.rect) 那一小块从生成图里贴回原图，padding 区域不参与合成
         resultUrl = await compositeImage(
@@ -277,6 +302,9 @@ export default function Sidebar() {
       current.selections.forEach((s) => {
         if (!s.processed) updateSelection(s.id, { processed: true } as any);
       });
+      // 回写质量分
+      const q = computeQuality(warnings.length, totalReviewRounds);
+      store.updateImageQuality(current.id, q, warnings);
       if (warnings.length > 0) {
         updateImageStatus(current.id, "done", `⚠ ${warnings.join("；")}`);
       } else {
@@ -288,6 +316,106 @@ export default function Sidebar() {
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  // 自动检测文本气泡：用 Gemini 输出多边形，作为 selection 加入
+  const handleAutoDetect = async () => {
+    const current = getCurrentImage();
+    if (!current) return;
+    try {
+      const { detectTextPolygonsWithAI } = await import("@/lib/ocr");
+      const polygons = await detectTextPolygonsWithAI(connection, current.originalDataUrl);
+      if (polygons.length === 0) {
+        updateImageStatus(current.id, current.status, "未检测到文本框");
+        return;
+      }
+      // 一次性插入所有 polygon 作为 selection
+      const addSelection = store.addSelection;
+      const updateSelection = store.updateSelection;
+      for (const p of polygons) {
+        addSelection(p.bbox);
+        const cur = useAppStore.getState().getCurrentImage();
+        const newSel = cur?.selections[cur.selections.length - 1];
+        if (newSel) {
+          updateSelection(newSel.id, { polygonPoints: p.points });
+        }
+      }
+    } catch (err: any) {
+      updateImageStatus(current.id, "error", err?.message ?? "auto-detect failed");
+    }
+  };
+
+  // Resume unfinished — 只跑还没 resultDataUrl 的图片
+  const handleResumeUnfinished = async () => {
+    const unfinished = images.filter(
+      (img) => (img.selections?.length || 0) > 0 && !img.resultDataUrl && img.status !== "error"
+    );
+    if (unfinished.length === 0) return;
+    const gateResult = checkBeforeGenerate(connection);
+    if (!gateResult.feasible) return;
+
+    setIsProcessing(true);
+    resetBatchProgress();
+    updateBatchProgress({ total: unfinished.length, completed: 0, failed: 0 });
+
+    const abortCtrl = new AbortController();
+    setAbortController(abortCtrl);
+
+    const { callAIWithSelfReview } = await import("@/lib/api");
+    const { compositeImage, extractRegion } = await import("@/lib/image");
+
+    const processOne = async (img: ImageEntry) => {
+      if (abortCtrl.signal.aborted) return;
+      updateImageStatus(img.id, "processing");
+      updateBatchProgress({ currentImage: img.fileName });
+      try {
+        let resultUrl = img.originalDataUrl;
+        const warnings: string[] = [];
+        let totalReviewRounds = 0;
+        for (const sel of img.selections) {
+          const prompt = applyPromptMode(sel.prompt || globalPrompt || "Edit this region naturally", store.promptMode);
+          const { regionDataUrl, expandedRect } = await extractRegion(img.originalDataUrl, sel.rect, 30);
+          const cropRect = {
+            x: sel.rect.x - expandedRect.x,
+            y: sel.rect.y - expandedRect.y,
+            width: sel.rect.width,
+            height: sel.rect.height,
+          };
+          const aiResult = await callAIWithSelfReview(connection, regionDataUrl, cropRect, prompt, 2);
+          const lenWarn = checkLengthDrift(aiResult.meta);
+          if (lenWarn) warnings.push(lenWarn);
+          if (aiResult.reviewRounds && aiResult.reviewRounds > 0) {
+            warnings.push(`经 ${aiResult.reviewRounds} 轮审查`);
+            totalReviewRounds += aiResult.reviewRounds;
+          }
+          resultUrl = await compositeImage(
+            resultUrl,
+            aiResult.imageDataUrl,
+            sel.rect,
+            cropRect,
+            { width: expandedRect.width, height: expandedRect.height }
+          );
+        }
+        updateImageResult(img.id, resultUrl);
+        store.updateImageQuality(img.id, computeQuality(warnings.length, totalReviewRounds), warnings);
+        updateImageStatus(img.id, "done", warnings.length > 0 ? `⚠ ${warnings.join("；")}` : undefined);
+        updateBatchProgress({ completed: batchProgress.completed + 1 });
+      } catch (err: any) {
+        updateImageStatus(img.id, "error", err.message);
+        updateBatchProgress({ failed: batchProgress.failed + 1 });
+      }
+    };
+
+    if (concurrency.mode === "serial") {
+      for (const img of unfinished) {
+        if (abortCtrl.signal.aborted) break;
+        await processOne(img);
+      }
+    } else {
+      await Promise.allSettled(unfinished.map(processOne));
+    }
+    setIsProcessing(false);
+    setAbortController(null);
   };
 
   // Batch generate
@@ -312,7 +440,7 @@ export default function Sidebar() {
     const abortCtrl = new AbortController();
     setAbortController(abortCtrl);
 
-    const { callAI } = await import("@/lib/api");
+    const { callAIWithSelfReview } = await import("@/lib/api");
     const { compositeImage, extractRegion } = await import("@/lib/image");
 
     const sourceSelections = current.selections.filter((s) => s.rect.width > 0 && s.rect.height > 0);
@@ -332,9 +460,10 @@ export default function Sidebar() {
       try {
         let resultUrl = img.resultDataUrl || img.originalDataUrl;
         const warnings: string[] = [];
+        let totalReviewRounds = 0;
 
         for (const sel of sourceSelections) {
-          const prompt = sourcePrompt || sel.prompt || "Edit this region naturally";
+          const prompt = applyPromptMode(sourcePrompt || sel.prompt || "Edit this region naturally", store.promptMode);
           const { regionDataUrl, expandedRect } = await extractRegion(img.originalDataUrl, sel.rect, 30);
           const cropRect = {
             x: sel.rect.x - expandedRect.x,
@@ -342,9 +471,13 @@ export default function Sidebar() {
             width: sel.rect.width,
             height: sel.rect.height,
           };
-          const aiResult = await callAI(connection, regionDataUrl, cropRect, prompt);
+          const aiResult = await callAIWithSelfReview(connection, regionDataUrl, cropRect, prompt, 2);
           const lenWarn = checkLengthDrift(aiResult.meta);
           if (lenWarn) warnings.push(lenWarn);
+          if (aiResult.reviewRounds && aiResult.reviewRounds > 0) {
+            warnings.push(`经 ${aiResult.reviewRounds} 轮审查`);
+            totalReviewRounds += aiResult.reviewRounds;
+          }
           resultUrl = await compositeImage(
             resultUrl,
             aiResult.imageDataUrl,
@@ -355,6 +488,7 @@ export default function Sidebar() {
         }
 
         updateImageResult(img.id, resultUrl);
+        store.updateImageQuality(img.id, computeQuality(warnings.length, totalReviewRounds), warnings);
         updateImageStatus(img.id, "done", warnings.length > 0 ? `⚠ ${warnings.join("；")}` : undefined);
         updateBatchProgress({ completed: batchProgress.completed + 1 });
       } catch (err: any) {
@@ -605,6 +739,29 @@ export default function Sidebar() {
         <label className="text-xs font-semibold text-sidebar-foreground/70 uppercase tracking-wider">
           {t("sidebar.prompt", language)}
         </label>
+        <div className="grid grid-cols-4 gap-1 text-[10px]">
+          {(["auto", "translate", "edit", "remove-watermark"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => store.setPromptMode(m)}
+              className={cn(
+                "px-1.5 py-1 rounded border transition-colors",
+                store.promptMode === m
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "border-sidebar-border text-sidebar-foreground/70 hover:bg-sidebar-accent"
+              )}
+              title={
+                m === "auto" ? "根据 prompt 关键词自动判断"
+                : m === "translate" ? "强制翻译模式：允许字符数变化、重新排版"
+                : m === "edit" ? "强制编辑模式：保持原视觉风格"
+                : "去水印：尤其强调背景重建"
+              }
+            >
+              {m === "auto" ? "自动" : m === "translate" ? "翻译" : m === "edit" ? "编辑" : "去水印"}
+            </button>
+          ))}
+        </div>
         <textarea
           value={globalPrompt}
           onChange={(e) => setGlobalPrompt(e.target.value)}
@@ -679,6 +836,14 @@ export default function Sidebar() {
         {!isProcessing ? (
           <>
             <button
+              onClick={handleAutoDetect}
+              disabled={!currentImage}
+              className="w-full flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-medium rounded-lg border border-sidebar-border text-sidebar-foreground hover:bg-sidebar-accent disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            >
+              <Wifi className="w-3.5 h-3.5" />
+              自动检测文本框
+            </button>
+            <button
               onClick={handleGenerate}
               disabled={!currentImage?.selections.length}
               className="w-full flex items-center justify-center gap-1.5 px-4 py-2.5 text-sm font-semibold rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
@@ -694,6 +859,22 @@ export default function Sidebar() {
               <Play className="w-3.5 h-3.5" />
               {t("sidebar.batchGenerate", language)}
             </button>
+            {(() => {
+              const unfinished = images.filter(
+                (img) => (img.selections?.length || 0) > 0 && !img.resultDataUrl && img.status !== "error"
+              );
+              if (unfinished.length === 0) return null;
+              return (
+                <button
+                  onClick={handleResumeUnfinished}
+                  disabled={images.length === 0}
+                  className="w-full flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-medium rounded-lg border border-amber-500/50 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  继续未完成 ({unfinished.length})
+                </button>
+              );
+            })()}
           </>
         ) : (
           <button
