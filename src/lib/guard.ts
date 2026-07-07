@@ -14,13 +14,7 @@ export interface FeasibilityResult {
 export function checkApiConnection(config: ConnectionConfig): FeasibilityResult {
   if (!config.apiKey?.trim()) return { feasible: false, reason: "API Key is empty", suggestion: "Enter your API key in Connection Settings" };
   if (!config.model?.trim()) return { feasible: false, reason: "Model is not specified", suggestion: "Select a model in Connection Settings" };
-  if (config.provider === "gemini" && !/image/i.test(config.model)) {
-    return {
-      feasible: false,
-      reason: `Gemini model "${config.model}" is not an image-output model`,
-      suggestion: "Use an image-capable Gemini model, e.g. gemini-2.5-flash-image, gemini-2.5-flash-image-preview, or gemini-3-pro-image-preview",
-    };
-  }
+  // 不校验模型名是否含 "image"：中转站常用自定义模型名（如 nano-banana-pro）走 Gemini 渠道
   return { feasible: true };
 }
 
