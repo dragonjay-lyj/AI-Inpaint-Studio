@@ -67,6 +67,28 @@ function stripModeMarker(userPrompt: string): string {
 }
 
 /**
+ * 从文本里抓第一个图片 URL，下载并转成 data URL。
+ * 中转站有时把生成结果以 URL 形式返回而非 inlineData base64。
+ */
+async function fetchImageUrlAsDataUrl(text: string): Promise<string | null> {
+  const urlMatch = text.match(/https?:\/\/[^\s"')]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s"')]*)?/i);
+  if (!urlMatch) return null;
+  try {
+    const resp = await fetch(urlMatch[0], { signal: AbortSignal.timeout(30000) });
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 用 OCR 结果反推源语言。返回的标签直接拼到 prompt 里给模型当 hint。
  */
 function detectLanguageFromOCR(ocrText: string): string | null {
@@ -210,6 +232,14 @@ async function callGeminiAPI(
   }
   if (imageDataUrl) {
     return { imageDataUrl, meta: parseMeta(textBlob) };
+  }
+
+  // 部分中转站把生成图以 URL 形式放在文本里返回，尝试下载
+  if (textBlob) {
+    const fromUrl = await fetchImageUrlAsDataUrl(textBlob);
+    if (fromUrl) {
+      return { imageDataUrl: fromUrl, meta: parseMeta(textBlob) };
+    }
   }
 
   // 无图片时收集文本用于诊断
